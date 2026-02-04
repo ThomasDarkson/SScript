@@ -269,13 +269,15 @@ class Parser {
 			tk = token();
 		}
 
-		if( tk != TStatement && tk != TEof && tk != TBrClose ) {
-			switch e.e {
-				case EFunction(_,_,_,_):
-				case EVar(_,_,_,_): // allowed
-				case _: 
-					if( !isBlock(e) ) 
-                		unexpected(tk);
+		if( tk != TStatement && tk != TEof ) {
+			if( tk != TBrClose ) { 
+				switch e.e {
+					case EFunction(_,_,_,_):
+					case EVar(_,_,_,_): // allowed
+					case _: 
+						if( !isBlock(e) ) 
+	                		unexpected(tk);
+				}
 			}
 			push(tk);
 		}

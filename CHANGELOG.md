@@ -1,3 +1,7 @@
+# 22.0.1
+## Fixes
+- Fixed `Unexpected <eof>` error
+
 # 22.0.0
 ## Removals
 - Removed all broken features and unnecessary restrictions to avoid confusion and future headaches
