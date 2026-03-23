@@ -1,3 +1,19 @@
+# 22.1.0
+## Additions
+- Added partial backward compatibility for older SScript versions
+
+## Fixes
+- Optimized a lot of code
+- Fixed freezing issues
+- Fixed grammar issues
+
+## Changes
+- `unset` has been renamed to `remove`
+- The improved field system is now disabled by default
+
+## Removals
+- Removed `fileName` from function calls; use `scriptFile` instead
+
 # 22.0.1
 ## Fixes
 - Fixed `Unexpected <eof>` error

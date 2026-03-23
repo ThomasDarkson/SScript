@@ -16,22 +16,22 @@ import hscript.backend.Preset.PresetMode;
 
 using StringTools;
 
+private typedef UnlockedFunctionCall =
+{
+	public var succeeded:Bool;
+	public var calledFunction:String;
+	public var returnValue:Null<Dynamic>;
+	public var exceptions:Array<Exception>;
+	public var lastReportedTime:Float;
+}
+
 /**
-	Structure containing several useful information about function calls.
+	Structure containing several useful pieces of information about function calls.
 **/
 typedef FunctionCall =
 {
-	#if sys
 	/**
-		Script's file name. Will be null if the script is not from a file.
-		
-		Not available on JavaScript.
-	**/
-	public var ?fileName(default, null):String;
-	#end
-	
-	/**
-		If the call has been successful or not.  
+		If the call was successful or not.
 	**/
 	public var succeeded(default, null):Bool;
 
@@ -61,7 +61,7 @@ typedef FunctionCall =
 /**
 	A HScript execution helper with functions for parsing, executing, and interacting with haxe scripts.
 
-	To get started, create a SScript instance: 
+	To get started, create an SScript instance:
 	
 	```haxe
 	import hscript.SScript;
@@ -107,7 +107,7 @@ class SScript
 		This may be exhausting for old or weak computers. 
 		Set this to null if you experience performance problems.
 	**/
-	public static var defaultImprovedField:Null<Bool> = true;
+	public static var defaultImprovedField:Null<Bool> = false;
 
 	/**
 		If not null, enables debug traces for `doString` and `new()`. 
@@ -147,10 +147,6 @@ class SScript
 	public static var globalVariables(default, null):Map<String, Dynamic> = [];
 	
 	static var IDCount(default, null):Int = 0;
-
-	static var BlankReg(get, never):EReg;
-
-	static var classReg(get, never):EReg;
 	
 	/**
 		Script-specific default function name.
@@ -166,7 +162,7 @@ class SScript
 
 		@see `SScript.defaultImprovedField`
 	**/
-	public var improvedField(default, set):Null<Bool> = true;
+	public var improvedField(default, set):Bool = false;
 
 	/**
 		A custom origin you can assign to this script.
@@ -289,7 +285,7 @@ class SScript
 		if (defaultImprovedField != null)
 			improvedField = defaultImprovedField;
 		else 
-			improvedField = improvedField;
+			improvedField = false;
 
 		parser = new Parser();
 
@@ -334,7 +330,7 @@ class SScript
 
 		This must be called at least once before calling script-defined functions.
 
-		Don't call this if you executed this script when creating its instance with the argument `startExecute` set to true.
+		Don't call this if the script was already executed when creating its instance with the `startExecute` argument set to true.
 	**/
 	public function execute():Void
 	{
@@ -384,8 +380,8 @@ class SScript
 		If the key already exists, it will be replaced.
 		@param key Variable name.
 		@param obj The object to set. Can be left blank.
-		@param setAsFinal Whether if set the object as final. If set as final, 
-		object will act as a final variable and cannot be changed in script.
+		@param setAsFinal Whether to set the object as final. If set as final,
+		the object will act as a final variable and cannot be changed in the script.
 		@return Returns this instance for chaining.
 	**/
 	public function set(key:String, ?obj:Dynamic, ?setAsFinal:Bool = false):SScript
@@ -395,7 +391,7 @@ class SScript
 		if (!active)
 			return this;
 		
-		if (key == null || BlankReg.match(key) || !classReg.match(key))
+		if (key == null || key.trim().length == 0)
 			throw '$key is not a valid class name';
 		else if (obj != null && (obj is Class) && notAllowedClasses.contains(obj))
 			throw 'Tried to set ${Type.getClassName(obj)} which is not allowed';
@@ -415,8 +411,8 @@ class SScript
 	}
 
 	/**
-		This is a helper function to set classes easily.
-		For example; if `cl` is `sys.io.File` class, it'll be set as `File`.
+		This is a helper function for setting classes easily.
+		For example, if `cl` is the `sys.io.File` class, it will be set as `File`.
 		@param cl The class to set.
 		@return this instance for chaining.
 	**/
@@ -450,8 +446,8 @@ class SScript
 	}
 
 	/**
-		Sets a class to this script from a string.
-		`cl` will be formatted, for example: `sys.io.File` -> `File`.
+		Sets a class in this script from a string.
+		`cl` will be formatted. For example: `sys.io.File` -> `File`.
 		@param cl The class to set.
 		@return this instance for chaining.
 	**/
@@ -471,10 +467,9 @@ class SScript
 		var cls:Class<Dynamic> = Type.resolveClass(cl);
 		if (cls != null)
 		{
-			if (cl.split('.').length > 1)
-			{
-				cl = cl.split('.')[cl.split('.').length - 1];
-			}
+			var parts = cl.split('.');
+			if (parts.length > 1)
+				cl = parts[parts.length - 1];
 
 			set(cl, cls);
 		}
@@ -483,12 +478,12 @@ class SScript
 
 	/**
 		A special object is checked when a variable is not found in this script instance.
-		
-		Special object can't be basic types like Int, String, Float, Array and Bool.
 
-		Instead, use it if you have a state instance.
+		A special object can't be a basic type like Int, String, Float, Array, or Bool.
+
+		Instead, use it for something like a state instance.
 		@param obj The special object. 
-		@param includeFunctions If false, functions will be ignored in the special object. 
+		@param includeFunctions If false, functions in the special object will be ignored.
 		@param exclusions Optional array of fields you want to exclude.
 		@return Returns this instance for chaining.
 	**/
@@ -520,7 +515,7 @@ class SScript
 	/**
 		Returns the local variables of this script as a fresh map.
 
-		Changing any value in returned map will not change the script's variables.
+		Changing any value in the returned map will not change the script's variables.
 	**/
 	public function locals():Map<String, Dynamic>
 	{
@@ -543,34 +538,37 @@ class SScript
 	/**
 		Removes a variable from this script. 
 
-		If a variable named `key` doesn't exist, unsetting won't do anything.
+		If a variable named `key` does not exist, this function won't do anything.
 		@param key Variable name to remove.
 		@return Returns this instance for chaining.
 	**/
-	public function unset(key:String):SScript
+	public function remove(key:String):SScript
 	{
 		if (_destroyed)
-			return null;
-		if (BlankReg.match(key) || !classReg.match(key))
+			return this;
+		if (key == null || key.trim().length == 0)
 			return this;
 		if (!active)
-				return null;
+			return this;
 
-		for (i in [interp.finalVariables, interp.variables])
-		{
-			if (i.exists(key))
-			{
-				i.remove(key);
-			}
-		}
+		if (interp.finalVariables.exists(key))
+			interp.finalVariables.remove(key);
+		if (interp.variables.exists(key))
+			interp.variables.remove(key);
 
 		return this;
+	}
+
+	@:deprecated('Use remove instead')
+	public function unset(key:String):SScript
+	{
+		return remove(key);
 	}
 
 	/**
 		Gets a variable by name. 
 
-		If a variable named as `key` does not exists return is null.
+		If a variable named `key` does not exist, `null` is returned.
 		@param key Variable name.
 		@return The object got by name.
 	**/
@@ -578,7 +576,7 @@ class SScript
 	{
 		if (_destroyed)
 			return null;
-		if (BlankReg.match(key) || !classReg.match(key))
+		if (key == null || key.trim().length == 0)
 			return null;
 
 		if (!active)
@@ -589,9 +587,8 @@ class SScript
 			return null;
 		}
 
-		var l = locals();
-		if (l.exists(key))
-			return l[key];
+		if (interp.locals.exists(key))
+       		return interp.locals.get(key).r;
 
 		var r = interp.finalVariables.get(key);
 		if (r == null)
@@ -607,10 +604,10 @@ class SScript
 		The script must be executed at least once before calling functions.
 
 		@param func Function name in script. 
-		@param args Arguments for the `func`. If the function does not require arguments, leave it null.
+		@param args Arguments for `func`. If the function does not require arguments, leave this as `null`.
 		@return Returns a `FunctionCall` object.
 	**/
-	public function call(func:String, ?args:Array<Dynamic>):FunctionCall
+	public function call(func:String, ?args:Array<Dynamic> = null):FunctionCall
 	{
 		if (_destroyed)
 			return {
@@ -633,17 +630,13 @@ class SScript
 		var time:Float = Timer.stamp();
 
 		var scriptFile:String = if (scriptFile != null && scriptFile.length > 0) scriptFile else "";
-		var caller:FunctionCall = {
+		var caller:UnlockedFunctionCall = {
 			exceptions: [],
 			calledFunction: func,
 			succeeded: false,
 			returnValue: null,
 			lastReportedTime: -1
 		}
-		#if sys
-		if (scriptFile != null && scriptFile.length > 0)
-			Reflect.setField(caller, "fileName", scriptFile);
-		#end
 		if (args == null)
 			args = new Array();
 
@@ -655,7 +648,7 @@ class SScript
 			
 			pushedExceptions.push(e);
 		}
-		if (func == null || BlankReg.match(func) || !classReg.match(func))
+		if (func == null || func.trim().length == 0)
 		{
 			if (traces)
 				trace('Function name cannot be invalid for $scriptFile!');
@@ -665,14 +658,14 @@ class SScript
 		}
 		
 		var fun = get(func);
-		if (exists(func) && Type.typeof(fun) != TFunction)
+		if (fun != null && Type.typeof(fun) != TFunction)
 		{
 			if (traces)
 				trace('$func is not a function');
 
 			pushException('$func is not a function');
 		}
-		else if (!exists(func))
+		else if (fun == null)
 		{
 			if (traces)
 				trace('Function $func does not exist in $scriptFile.');
@@ -693,13 +686,9 @@ class SScript
 					calledFunction: func,
 					succeeded: true,
 					returnValue: functionField,
-					lastReportedTime: -1,
+					lastReportedTime: -1
 				};
-				#if sys
-				if (scriptFile != null && scriptFile.length > 0)
-					Reflect.setField(caller, "fileName", scriptFile);
-				#end
-				Reflect.setField(caller, "lastReportedTime", Timer.stamp() - time);
+				caller.lastReportedTime = Timer.stamp() - time;
 			}
 			catch (e)
 			{
@@ -736,8 +725,8 @@ class SScript
 
 	/**
 		Checks whether `key` exists in this script's interpreter.
-		@param key The variable's name to look for.
-		@return Returns true if `key` is found in interpreter.
+		@param key The variable name to look for.
+		@return Returns true if `key` is found in the interpreter.
 	**/
 	public function exists(key:String):Bool
 	{
@@ -745,24 +734,22 @@ class SScript
 			return false;
 		if (!active)
 			return false;
-		if (BlankReg.match(key) || !classReg.match(key))
+		if (key == null || key.trim().length == 0)
 			return false;
 
-		var l = locals();
-		if (l.exists(key))
-			return l.exists(key);
+		if (interp.locals.exists(key))
+        	return true;
+		if (interp.finalVariables.exists(key))
+			return true;
+		if (interp.variables.exists(key))
+			return true;
 
-		for (i in [interp.variables, interp.finalVariables])
-		{
-			if (i.exists(key))
-				return true;
-		}
 		return false;
 	}
 
 	/**
 		Sets useful default variables to make this script easier to use.
-		Override this function to set your custom sets aswell. 
+		Override this function to set your custom values as well.
 
 		Don't forget to call `super.preset()`!
 	**/
@@ -791,10 +778,21 @@ class SScript
 		if (_destroyed)
 			return;
 
+		interp.specialObject = null;
+		interp.script = null;
 		interp.locals = null;
 		interp.variables = null;
 		interp.finalVariables = null;
 		interp.declared = null;
+	}
+
+	function useIDForGlobal() 
+	{
+		if (ID == null) {
+			ID = IDCount + 1;
+			IDCount++;
+		}
+		global[Std.string(ID)] = this;
 	}
 
 	function doFile(scriptPath:String):Void
@@ -802,11 +800,9 @@ class SScript
 		if (_destroyed)
 			return;
 
-		if (scriptPath == null || scriptPath.length < 1 || BlankReg.match(scriptPath))
+		if (scriptPath == null || scriptPath.length < 1 || StringTools.trim(scriptPath).length == 0)
 		{
-			ID = IDCount + 1;
-			IDCount++;
-			global[Std.string(ID)] = this;
+			useIDForGlobal();
 			return;
 		}
 
@@ -831,21 +827,21 @@ class SScript
 			if (scriptFile != null && scriptFile.length > 0)
 				global[scriptFile] = this;
 			else if (script != null && script.length > 0)
-				global[script] = this;
+				useIDForGlobal();
 		}
 	}
 
 	/**
 		Executes a string once instead of a script file.
 
-		This does not change your `scriptFile` but it changes `script`.
+		This does not change `scriptFile`, but it does change `script`.
 
 		Even though this function is faster,
 		it should be avoided whenever possible.
 		Always try to use a script file.
-		@param string String you want to execute. If this argument is a file, this will act like `new` and will change `scriptFile`.
+		@param string The string you want to execute. If this argument is a file path, this will behave like `new()` and will change `scriptFile`.
 		@param origin Optional origin to use for this script, it will appear on traces.
-		@return Returns this instance for chaining. Will return `null` if failed.
+		@return Returns this instance for chaining. Returns `null` if it fails.
 	**/
 	public function doString(string:String, ?origin:String):SScript
 	{
@@ -853,7 +849,7 @@ class SScript
 			return null;
 		if (!active)
 			return null;
-		if (string == null || string.length < 1 || BlankReg.match(string))
+		if (string == null || string.length < 1 || StringTools.trim(string).length == 0)
 			return this;
 
 		parsingException = null;
@@ -862,10 +858,7 @@ class SScript
 		try 
 		{
 			#if sys
-			if (FileSystem.exists(string.trim()))
-				string = string.trim();
-			
-			if (FileSystem.exists(string))
+			if (string.length < 260 && FileSystem.exists(string))
 			{
 				scriptFile = string;
 				origin = string;
@@ -887,15 +880,11 @@ class SScript
 			
 			if (scriptFile != null && scriptFile.length > 0)
 			{
-				if (ID != null)
-					global.remove(Std.string(ID));
 				global[scriptFile] = this;
 			}
 			else if (script != null && script.length > 0)
 			{
-				if (ID != null)
-					global.remove(Std.string(ID));
-				global[script] = this;
+				useIDForGlobal();
 			}
 
 			function tryHaxe()
@@ -946,20 +935,20 @@ class SScript
 
 	#if sys
 	/**
-		Finds scripts in the provided path and returns them as an array.
+		Finds scripts in the provided path and returns them in an array.
 
 		Make sure `path` is a directory!
 
 		If `extensions` is not `null`, file extensions will be checked.
 		Otherwise, only files with the `.hx` extensions will be checked and listed.
 
-		@param path The directory to check for. Nondirectory paths will be ignored.
+		@param path The directory to check. Non-directory paths will be ignored.
 		@param extensions Optional extension to check in file names.
-		@return Found scripts in an array.
+		@return An array of found scripts.
 	**/
 	#else
 	/**
-		Finds scripts in the provided path and returns them as an array.
+		Finds scripts in the provided path and returns them in an array.
 
 		This function will always return an empty array, because you are targeting an unsupported target.
 		@return An empty array.
@@ -999,7 +988,7 @@ class SScript
 	}
 
 	/**
-		This function makes this script instance **COMPLETELY** unusable and unrestorable.
+		This function makes this script instance completely unusable and impossible to restore.
 
 		If you don't want to destroy your script just yet, just set `active` to false!
 
@@ -1012,10 +1001,8 @@ class SScript
 
 		if (global.exists(scriptFile) && scriptFile != null && scriptFile.length > 0)
 			global.remove(scriptFile);
-		else if (global.exists(script) && script != null && script.length > 0)
-			global.remove(script);
 		if (ID != null && global.exists(Std.string(ID)))
-			global.remove(script);
+			global.remove(Std.string(ID));
 
 		presetter.destroy();
 
@@ -1030,7 +1017,6 @@ class SScript
 		script = null;
 		scriptFile = null;
 		active = false;
-		improvedField = null;
 		notAllowedClasses = null;
 		lastReportedTime = -1;
 		ID = null;
@@ -1071,23 +1057,13 @@ class SScript
 		return customOrigin = value;
 	}
 
-	function set_improvedField(value:Null<Bool>):Null<Bool> 
+	function set_improvedField(value:Bool):Bool
 	{
 		if (_destroyed)
-			return null;
+			return false;
 
 		if (interp != null)
-			interp.improvedField = value == null ? false : value;
+			interp.improvedField = value;
 		return improvedField = value;
-	}
-
-	static function get_BlankReg():EReg 
-	{
-		return ~/^[\n\r\t]$/;
-	}
-
-	static function get_classReg():EReg 
-	{
-		return  ~/^[a-zA-Z_][a-zA-Z0-9_]*$/;
 	}
 }

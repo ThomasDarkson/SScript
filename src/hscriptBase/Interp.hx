@@ -78,15 +78,12 @@ class Interp {
 
 	var improvedField : Bool = true;
 
-	var curClass : String;
-
 	public inline function setScr(s)
 	{
 		return script = s;
 	}
 
 	var resumeError : Bool = false;
-	var canUseAbs : Bool = false;
 
 	public function new() {
 		#if haxe3
@@ -554,7 +551,6 @@ class Interp {
 			restore(old);
 			return v;
 		case EField(e,f,fields):
-			canUseAbs = true;
 			if( improvedField && fields != null && fields.length > 1 )
 			{
 				var r = findField(fields);
@@ -562,7 +558,6 @@ class Interp {
 					return r;
 			}
 			var r = get(expr(e),f);
-			canUseAbs = false;
 			return r;
 		case ESwitchBinop(p, e1, e2):
 			var parent = expr(p);
