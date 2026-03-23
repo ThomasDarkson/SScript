@@ -7,7 +7,7 @@ SuperlativeScript is a fork of HScript with fixes and improvements.
 ## Installation
 `haxelib install SScript`
 
-Enter this command in command prompt to get the latest release from Haxe library.
+Enter this command in the command prompt to get the latest release from the Haxe library.
 
 After installing SScript, don't forget to add it to your Haxe project.
 
@@ -28,7 +28,7 @@ Add this to `build.hxml` to add SScript to your Haxe build.
 Haxe definition `hscriptPos` is deprecated and shouldn't be used unless you also want to use vanilla HScript.
 
 ## Usage
-To use SScript, you will need a file or a script. Using a file is recommended.
+To use SScript, you will need either a file or a script. Using a file is recommended.
 
 ### Using without a file
 ```haxe
@@ -53,7 +53,7 @@ import hscript.SScript;
 
 class Main {
 	static function main() {
-		var script:SScript = new SScript("script.hx"); // Has the same contents with the script above
+		var script:SScript = new SScript("script.hx"); // Contains the same code as the script above
 		var randomNumber:Float = script.call('returnRandom').returnValue;
 	}
 }
@@ -72,7 +72,7 @@ class Main {
 		var script:SScript = new SScript();
 		script.doString("
 			import Date;
-			trace(Data.now());
+			trace(Date.now());
 		");
 	}
 }
@@ -114,7 +114,7 @@ class Main
 ```
 
 #### String Interpolation
-SScript supports string interpolation. Just like normal haxe, special identifiers, denoted by the dollar sign `$` within a String enclosed by single-quote `'` characters, are evaluated as if they were concatenated identifiers.
+SScript supports string interpolation. Just like in Haxe, special identifiers denoted by the dollar sign `$` within a string (enclosed by single quotes `'`) are evaluated as expressions.
 
 ```haxe
 import hscript.SScript;
@@ -163,14 +163,15 @@ class Main {
 }
 ```
 
-You can still create regular expression with regular syntax:
+You can still create regular expressions using the standard syntax:
 ```haxe
 var r = new EReg("haxe", "i");
 ```
 
 ##### Limitations
-With faulty EReg's, Haxe may show corrupted error messages. These errors are uncatchable and will crash the session.
-Sometimes, Haxe may not show error messages. If this happens, session will be caught in a loop and it will become unresponsive. 
+With faulty EReg instances, Haxe may produce corrupted error messages. These errors cannot be caught and may crash the session.
+
+Sometimes, Haxe may not display error messages. If this happens, the session may enter a loop and become unresponsive.
 
 Platform limitations also apply here, the flag `u` is only available in C++ and Neko.
 Flag `s` is not available in C# and JavaScript.
@@ -221,12 +222,13 @@ class Main {
 ## Presetting System
 Presets are the variables that get set before the script gets executed. 
 
-SScript has a presetting system where you can set multiple preset modes 
-to customize presetting. Currently it has 4 modes, `NONE`, `MINI`, `REGULAR` and `FULL`.
+SScript has a presetting system that allows you to configure multiple preset modes.
 
-- `MINI` only contains basic classes and extremely lightweight,
-- `REGULAR` contains slightly more and it includes more common classes aswell.
-- `FULL` contains all existing classes, expensive when there are many scripts being handled. (Avaiable only if `DISABLED_MACRO_SUPERLATIVE` is undefined)
+Currently, it includes 4 modes: `NONE`, `MINI`, `REGULAR`, and `FULL`.
+
+- `MINI` contains only basic classes and is extremely lightweight.
+- `REGULAR` includes more commonly used classes.
+- `FULL` includes all available classes and can be expensive when handling many scripts. (Available only if `DISABLED_MACRO_SUPERLATIVE` is not defined)
 
 Example:
 ```haxe

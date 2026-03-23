@@ -1,3 +1,8 @@
+# 22.1.2
+## Fixes
+- Fixed backward compatability
+- Fixed grammar issues in README
+
 # 22.1.1
 ## Additions
 - Added `FULL` as a Preset mode
