@@ -220,7 +220,10 @@ class Interp {
 	}
 
 	function setVar( name : String, v : Dynamic ) {
-		variables.set(name, v);
+		if( specialObject != null && specialObject.obj != null && specialObjectsFields.contains( name ) ) 
+			Reflect.setProperty(specialObject.obj, name, v);
+		else
+			variables.set(name, v);
 	}
 
 	function assign( e1 : Expr, e2 : Expr ) : Dynamic {
@@ -234,8 +237,22 @@ class Interp {
 			{
 				if( finalVariables.exists(id) )
 					return error(EInvalidFinal(id));
-		
-				if(!variables.exists(id))
+
+				var i = 0;
+				if( !variables.exists(id) )
+					i++;
+				if( specialObject != null ) {
+					if ( specialObject.obj != null ) {
+						if ( !specialObjectsFields.contains( id ) )
+							i++;
+					}
+					else
+						i++;
+				}
+				else
+					i++;
+
+				if ( i == 2 )
 					error(EUnknownVariable(id));
 				setVar(id,v);
 			}

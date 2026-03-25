@@ -1,3 +1,7 @@
+# 22.2.2
+## Fixes
+- You can now edit the properties of special objects in scripts
+
 # 22.2.1
 ## Fixes
 - Fixed the `Special object cannot be an enum constructor` error showing up even if the special object is not an enum constructor
