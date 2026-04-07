@@ -1,3 +1,8 @@
+## 22.3.1
+## Fixes
+- Fixed C# compilation error (error CS1002)
+- Optimized `for` loops
+
 # 22.3.0
 ## Additions
 - Added Static Extensions, with some limitations 

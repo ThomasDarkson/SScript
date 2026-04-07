@@ -12,19 +12,22 @@ class InterpIterator
     	var min:Dynamic = instance.expr(expr1);
 		var max:Dynamic = instance.expr(expr2);
 
+		var isFloat = Std.isOfType(min, Float);
+		var isInt = Std.isOfType(min, Int);
+
 		if (min == null)
 			instance.error(ECustom('null should be Int'));
 		if (max == null)
 			instance.error(ECustom('null should be Int'));
 
-		if (Std.isOfType(min, Float) && !Std.isOfType(min, Int))
+		if (isFloat && !isInt)
 			instance.error(ECustom('Float should be Int'));
-		if (Std.isOfType(max, Float) && !Std.isOfType(max, Int))
+		if (isFloat && !isInt)
 			instance.error(ECustom('Float should be Int'));
 
-		if (!Std.isOfType(min, Int))
+		if (!isInt)
 			instance.error(ECustom('${Type.getClassName(Type.getClass(min))} should be Int'));
-		if (!Std.isOfType(max, Int))
+		if (!isInt)
 			instance.error(ECustom('${Type.getClassName(Type.getClass(max))} should be Int'));
 
 		this.min = min;

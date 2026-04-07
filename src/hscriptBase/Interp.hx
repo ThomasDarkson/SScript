@@ -1015,6 +1015,7 @@ class Interp {
 		var ec : Dynamic = expr(econd);
 		checkBool(ec,"do while");
 		inBool = false;
+		#if !cs
 		do {
 			try {
 				expr(e);
@@ -1030,6 +1031,27 @@ class Interp {
 			inBool = false;
 		}
 		while( ec );
+		#else
+		// the compiler forgets to add a semicolon when we do a do while loop for some reason in cs
+		// so here is a shitty workaround
+		var eccs:Int = 0;
+		while( eccs < 1 ) {
+			try {
+				expr(e);
+			} catch( err : Stop ) {
+				switch(err) {
+				case SContinue:
+				case SBreak: break;
+				case SReturn: throw err;
+				}
+			}
+			inBool = true;
+			ec = expr(econd);
+			if( ec ) eccs = 0;
+			else eccs = 1;
+			inBool = false;
+		}
+		#end
 		strictVar = false;
 		restore(old);
 	}
