@@ -126,8 +126,17 @@ class SScript
 
 	/**
 		If not null, enables debug traces for `doString` and `new()`. 
+
+		@see `debugTraces`
 	**/
 	public static var defaultDebug:Null<Bool> = null;
+
+	/**
+		If not null, enables error traces for all of the methods. 
+
+		@see `traces`
+	**/
+	public static var defaultTraces:Null<Bool> = null;
 
 	/**
 		Default preset mode for Haxe classes.
@@ -301,6 +310,8 @@ class SScript
 			debugTraces = defaultDebug;
 		if (defaultFun != null)
 			defaultFunc = defaultFun;
+		if (defaultTraces != null)
+			traces = defaultTraces;
 
 		interp = new Interp();
 		interp.setScr(this);
@@ -418,12 +429,18 @@ class SScript
 		if (!active)
 			return this;
 		
-		if (key == null || key.trim().length == 0)
-			throw '$key is not a valid class name';
-		else if (obj != null && (obj is Class) && notAllowedClasses.contains(obj))
-			throw 'Tried to set ${Type.getClassName(obj)} which is not allowed';
-		else if (Tools.keys.contains(key))
-			throw '$key is a keyword and cannot be replaced';
+		if (key == null || key.trim().length == 0) {
+			traceError('$key is not a valid class name', "set", [key, obj, setAsFinal]);
+			return this;
+		}
+		else if (obj != null && (obj is Class) && notAllowedClasses.contains(obj)) {
+			traceError('Tried to set ${Type.getClassName(obj)} which is not allowed', 'set', [key, obj, setAsFinal]);
+			return this;
+		}
+		else if (Tools.keys.contains(key)) {
+			traceError('$key is a keyword and cannot be replaced', "set", [key, obj, setAsFinal]);
+			return this;
+		}
 
 		if (setAsFinal == null)
 			setAsFinal = obj != null && (Std.isOfType(obj, Class));
@@ -460,7 +477,7 @@ class SScript
 				traceError('Class cannot be null', 'setClass', [cl, setAsFinal]);
 			}
 
-			return null;
+			return this;
 		}
 
 		if (setAsFinal == null)
@@ -498,7 +515,7 @@ class SScript
 			if (traces)
 				traceError('Class cannot be null', 'setClassString', [cl, setAsFinal]);
 
-			return null;
+			return this;
 		}
 
 		var cls:Class<Dynamic> = Type.resolveClass(cl);
@@ -536,7 +553,7 @@ class SScript
 			if (traces)
 				traceError('Package name cannot be null or empty', 'setByPackage', [_package, recursive, setAsFinal]);
 
-			return null;
+			return this;
 		}
 
 		var prefix:String = _package;
@@ -606,12 +623,15 @@ class SScript
 
 		var types:Array<Dynamic> = [Int, String, Float, Bool, Array];
 		for (i in types)
-			if (Std.isOfType(obj, i))
-				throw 'Special object cannot be ${i}';
+			if (Std.isOfType(obj, i)) {
+				traceError('Special object cannot be ${i}', "setSpecialObject", [obj, includeFunctions, exclusions]);
+				return this;
+			}
 
 		switch Type.typeof(obj) {
 			case TEnum(e):
-				throw 'Special object cannot be an enum constructor (${Type.getEnumName(e)})';
+				traceError('Special object cannot be an enum constructor (${Type.getEnumName(e)})', "setSpecialObject", [obj, includeFunctions, exclusions]);
+				return this;
 			default:
 		}
 
@@ -713,7 +733,7 @@ class SScript
 			if (traces)
 				traceError("This script is not active!", "get");
 
-			return null;
+			return this;
 		}
 
 		if (interp.locals.exists(key))
@@ -976,7 +996,7 @@ class SScript
 		if (_destroyed)
 			return null;
 		if (!active)
-			return null;
+			return this;
 		if (string == null || string.length < 1 || StringTools.trim(string).length == 0)
 			return this;
 

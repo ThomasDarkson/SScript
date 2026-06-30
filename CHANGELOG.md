@@ -1,3 +1,10 @@
+## 22.4.1
+## Additions
+- Added `defaultTraces`
+
+## Changes
+- Changed some of the errors so they are logged, not thrown
+
 ## 22.4.0
 ## Additions
 - Added `setByPackage`, which sets multiple classes in a package (not available if `DISABLED_MACRO_SUPERLATIVE` is defined)

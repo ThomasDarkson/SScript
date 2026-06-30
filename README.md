@@ -224,6 +224,7 @@ import hscript.SScript;
 class Main {
 	static function main()
 	{
+		SScript.defaultImprovedField = true;
 		var script = new SScript();
 		script.doString("
 			trace(haxe.Timer.stamp());
@@ -393,6 +394,7 @@ import hscript.SScript;
 class Main 
 {
 	static function main() {
+		SScript.globalVariables.set('variable2', 2);
 		var script:SScript = new SScript();
 		script.set('variable', 1);
 		script.doString('
@@ -402,7 +404,6 @@ class Main
 			}
 		');
 
-		SScript.globalVariables.set('variable2', 2);
 		trace(script.call('returnVar').returnValue); // 3
 	}
 }
