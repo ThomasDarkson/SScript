@@ -61,7 +61,7 @@ enum ExprDef {
 	EArrayDecl( e : Array<Expr> );
 	ENew( cl : String, params : Array<Expr> , ?subIds : Array<String> );
 	EThrow( e : Expr );
-	ETry( e : Expr, v : String, t : Null<CType>, ecatch : Expr );
+	ETry( e : Expr, catches : Array<{ v : String, t : Null<CType>, e : Expr }> );
 	EObject( fl : Array<{ name : String, e : Expr }> );
 	ETernary( cond : Expr, e1 : Expr, e2 : Expr );
 	ESwitch( e : Expr, cases : Array<{ values : Array<Expr>, expr : Expr , ifExpr : Expr }>, ?defaultExpr : Expr);
@@ -73,6 +73,8 @@ enum ExprDef {
 	EMeta( hasDot : Bool , name : String, args : Array<Expr>, e : Expr );
 	EEReg( chars : String , ops : String );
 	ECheckType( e : Expr, t : CType );
+	ECast( e : Expr, ?t : CType );
+	EUntyped( e : Expr );
 }
 
 typedef Argument = { name : String, ?t : CType, ?opt : Bool, ?value : Expr };

@@ -1,11 +1,51 @@
-## 22.4.1
+# 23.0.0
+## Additions
+- Added HScript sandboxing
+    - Blocks implicit class access by dotted string (`new sys.io.File`, `Sys.systemName`, `import sys.FileSystem;`, `sys.io.File.getContent()`, `using SomeClass;`) by category via `hscriptBlockedLibs`/`HScriptSandbox.HScriptLib`, with `hscriptExtraBlockedClasses`/`hscriptExtraAllowedClasses` for explicit overrides
+    - Bounds a sandboxed script with `hscriptInstructionLimit`/`hscriptTimeLimitMs` so a runaway loop or unbounded recursion can't hang the host
+    - Classes set only via preset (e.g. `Sys` under `REGULAR`) are not reachable in a sandboxed script because they are not set, they must go through `hscriptExtraAllowedClasses` or an explicit `set()`
+- Added `interpCompilesFunctionCode` (and `SScript.defaultCompile` to set the default for new instances). When enabled, a script function's body is compiled first time that function is called, then reused on every subsequent call, trading a one-time build cost for a cheaper path on repeated calls
+- (**C++ ONLY**) Added `interpCachesCompiledLocals`; in compiled functions, locals are now cached and used instead of re-evaluating local variables, cached local variable changes when a local variable changes 
+- Special Object now supports anonymous structures
+- Added support for multiple typed `catch` clauses on a single `try` (e.g. `try { ... } catch(e:CustomException) { ... } catch(e:String) { ... } catch(e) { ... }`), matched in order against the thrown value's type
+- Added enum pattern matching in `switch`, e.g. `case SomeCtor(x):` now binds `x` as a new local from the enum's constructor arguments instead of comparing it
+- Added `variablesToSet` to the constructor, which allows scripts to have custom variables when creating a script
+- Added `cast expr` and `cast(expr, Type)` support
+- Added `untyped` support 
+- Added `SScript.setEnum()`, to set Enums into scripts easily
+
+## Changes
+- (**C++ ONLY**) `+`, `%`, `++` and `--` on Dynamic values now go through native fast paths
+- `SScript.defaultImprovedField` now defaults to `true`, again
+- Removed every unnecessary checks in `set()`, so it runs faster
+- Error messages and traces, if no file is present, now use the SScript instance turned into a String as their origin (unless `customOrigin` is set)
+- Completely reworked `debugTraces`
+- String interpolation now caches the parsed expression for each unique `${...}` segment instead of re-parsing it on every evaluation, so it's more optimized
+- `remove()` and `clear()` now also clean up local variables
+- `traceError` is now `public` and `dynamic`, so it can be overridden
+- `new Map()` inside a script is now special-cased to always return a `Map<Dynamic, Dynamic>`
+
+## Fixes
+- Fixed string interpolations reporting errors incorrectly
+- Fixed optional arguments not working as intended
+- Fixed `using` not working as intended
+- Fixed `get()` return an SScript instance instead of null when the script is inactive
+- Fixed `returnValue` not working as expected
+- Fixed `??`, `??=`, and `?.` not allowing further chained operations on their result (e.g. `a ?? b.c`, `a?.b()`)
+- Fixed multiple bugs with null coalescing
+- Fixed a bug in `destroy()`
+
+## Removals
+- `notAllowedClasses` has now no effect, due to sandboxing being added
+
+# 22.4.1
 ## Additions
 - Added `defaultTraces`
 
 ## Changes
 - Changed some of the errors so they are logged, not thrown
 
-## 22.4.0
+# 22.4.0
 ## Additions
 - Added `setByPackage`, which sets multiple classes in a package (not available if `DISABLED_MACRO_SUPERLATIVE` is defined)
 - Added `className` argument to `call`, to improve backward compatibility
@@ -22,7 +62,7 @@
 - Removed dead code that supposedly added support for Haxe 2
     - SScript doesn't support Haxe 2 or 3
 
-## 22.3.1
+# 22.3.1
 ## Fixes
 - Fixed C# compilation error (error CS1002)
 - Optimized `for` loops

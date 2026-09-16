@@ -91,10 +91,6 @@ class Parser {
 	var oldTokenMax : Int;
 	var tokens : List<{ min : Int, max : Int, t : Token }>;
 
-	var script : SScript;
-
-	function setScr(scr) script = scr;
-
 	public function new() {
 		line = 1;
 		opChars = "+*/-=!><&|^%";
@@ -134,9 +130,10 @@ class Parser {
 		error(EInvalidChar(c), readPos-1, readPos-1);
 	}
 
-	function initParser( origin ) {
+	function initParser( origin , ?startingLine : Int ) {
 		this.origin = origin;
 		readPos = 0;
+		line = startingLine != null ? startingLine : 1;
 		tokenMin = oldTokenMin = 0;
 		tokenMax = oldTokenMax = 0;
 		tokens = new List();
@@ -150,8 +147,8 @@ class Parser {
 			idents[identChars.charCodeAt(i)] = true;
 	}
 
-	public function parseString( s : String, ?origin : String = "SScript" ) {
-		initParser(origin);
+	public function parseString( s : String, ?origin : String = "SScript" , ?startingLine : Int ) {
+		initParser(origin, startingLine);
 		input = s;
 		readPos = 0;
 		var a = new Array();
@@ -237,7 +234,7 @@ class Parser {
 		case EDoWhile(_,e): isBlock(e);
 		case EFor(_,_,_,e): isBlock(e);
 		case EReturn(e): e != null && isBlock(e);
-		case ETry(_, _, _, e): isBlock(e);
+		case ETry(_, catches): catches.length > 0 && isBlock(catches[catches.length - 1].e);
 		case EMeta(_,_,_,e): if( e == null ) true else isBlock(e);
 		default: false;
 		}
@@ -730,27 +727,61 @@ class Parser {
 			}
 			var args = parseExprList(TPClose);
 			mk(ENew(a.join("."),args,subIds),p1);
+		case "cast":
+			var tk = token();
+			switch( tk ) {
+			case TPOpen:
+				var inner = parseExpr();
+				var tk2 = token();
+				switch( tk2 ) {
+				case TComma:
+					var t = parseType();
+					ensure(TPClose);
+					mk(ECast(inner, t), p1, tokenMax);
+				case TPClose:
+					mk(ECast(inner, null), p1, tokenMax);
+				default:
+					unexpected(tk2);
+				}
+			default:
+				push(tk);
+				var inner = parseExpr();
+				mk(ECast(inner, null), p1, pmax(inner));
+			}
+		case "untyped":
+			var e = parseExpr();
+			mk(EUntyped(e), p1, pmax(e));
 		case "throw":
 			var e = parseExpr();
 			mk(EThrow(e),p1,pmax(e));
 		case "try":
 			var e = parseExpr();
-			ensureToken(TId("catch"));
-			ensure(TPOpen);
-			var cname = getIdent();
-			var t = null;
-			var canensure=true;
-			var tk=token();
-			if(tk==TDoubleDot &&allowTypes)
-			{
-				t=parseType();
+			var catches = [];
+			var first = true;
+			while( true ) {
+				var tk = if( first ) { ensureToken(TId("catch")); TId("catch"); } else token();
+				if( !Type.enumEq(tk, TId("catch")) ) {
+					push(tk);
+					break;
+				}
+				first = false;
+				ensure(TPOpen);
+				var cname = getIdent();
+				var t = null;
+				var canensure=true;
+				var tk2=token();
+				if(tk2==TDoubleDot &&allowTypes)
+				{
+					t=parseType();
+				}
+				else{
+					canensure = false;
+				}
+				if(canensure)ensure(TPClose);
+				var ce = parseExpr();
+				catches.push({ v : cname, t : t, e : ce });
 			}
-			else{
-				canensure = false;
-			}
-			if(canensure)ensure(TPClose);
-			var ce = parseExpr();
-			mk(ETry(e, cname, t, ce), p1, pmax(ce));
+			mk(ETry(e, catches), p1, pmax(catches[catches.length - 1].e));
 		case "switch":
 			var parentExpr = parseExpr();
 			var def = null, cases = [];
@@ -993,8 +1024,16 @@ class Parser {
 				fields.push(field);
 			return parseExprNext(mk(EField(e1,field,fields),pmin(e1)));
 		case TPOpen:
+			if( isBlock(e1) ) {
+				push(tk);
+				return e1;
+			}
 			return parseExprNext(mk(ECall(e1,parseExprList(TPClose)),pmin(e1)));
 		case TBkOpen:
+			if( isBlock(e1) ) {
+				push(tk);
+				return e1;
+			}
 			var e2 = parseExpr();
 			ensure(TBkClose);
 			return parseExprNext(mk(EArray(e1,e2),pmin(e1)));
@@ -1005,17 +1044,17 @@ class Parser {
 			return mk(ETernary(e1,e2,e3),pmin(e1),pmax(e3));
 		case TQDouble:
 			var e2 = parseExpr();
-			return mk(ECoalesce(e1,e2,false), pmin(e1));
+			return parseExprNext(mk(ECoalesce(e1,e2,false), pmin(e1)));
 		case TQDoubleAssign:
 			var e2 = parseExpr();
-			return mk(ECoalesce(e1,e2,true), pmin(e1));
+			return parseExprNext(mk(ECoalesce(e1,e2,true), pmin(e1)));
 		case TQDot:
 			var oldPos_ = readPos;
 			var tk = token();
 			switch tk {
 				case TId(s):
 					//push(tk);
-					return mk(ESafeNavigator(e1, s), pmin(e1));
+					return parseExprNext(mk(ESafeNavigator(e1, s), pmin(e1)));
 				case _:
 			}
 

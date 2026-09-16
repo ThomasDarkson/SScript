@@ -1,5 +1,7 @@
 dump/
 build.hxml
+build_test.hxml
 bin/
 Main.hx
 SScript.zip
+test/

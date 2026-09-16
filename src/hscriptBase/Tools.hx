@@ -33,21 +33,16 @@ using StringTools;
 class Tools {
 	static final thisName:String = 'hscriptBase.Tools';
 
-	static var keys:Array<String> = [
-		"import", "package", "if", "var", "for", "while", "final", "do", "as", "using", "break", "continue",
-		"public", "private", "static", "overload", "override", "class", "function", "else", "try", "catch",
-		"abstract", "case", "switch", "untyped", "cast", "typedef", "dynamic", "default", "enum", "extern",
-		"extends", "implements", "in", "macro", "new", "null", "return", "throw", "from", "to", "super", "is"
+	static final keys:Map<String, Bool> = [
+		"import" => true, "package" => true, "if" => true, "var" => true, "for" => true, "while" => true, "final" => true, "do" => true,
+		"as" => true, "using" => true, "break" => true, "continue" => true, "public" => true, "private" => true, "static" => true,
+		"overload" => true, "override" => true, "class" => true, "function" => true, "else" => true, "try" => true, "catch" => true,
+		"abstract" => true, "case" => true, "switch" => true, "untyped" => true, "cast" => true, "typedef" => true, "dynamic" => true,
+		"default" => true, "enum" => true, "extern" => true, "extends" => true, "implements" => true, "in" => true, "macro" => true,
+		"new" => true, "null" => true, "return" => true, "throw" => true, "from" => true, "to" => true, "super" => true, "is" => true,
+		"true" => true, "false" => true
 	];
-
-	static var enumKeys:Array<String> = {
-		var keys = keys.copy();
-		var remove = ["var","public","private","function","try","catch","abstract","enum","switch","case","new","null","throw"];
-		for( i in remove )
-			keys.remove(i);
-		keys;
-	}
-
+	
 	public static function resolve( clOrEnum : String ) {
 		var cl:Dynamic = Type.resolveClass(clOrEnum);
 		if( cl == null ) cl = Type.resolveEnum(clOrEnum);
@@ -95,7 +90,48 @@ class Tools {
 		return if (e == null) null else e.e;
 	}
 
-	#if !DISABLED_MACRO_SUPERLATIVE
+	public static function isClass(t:Dynamic):Bool
+	{
+		if( t == null )
+			return false;
+
+		var enumIs = Std.isOfType(t, Class);
+		#if cpp
+		if( enumIs )
+			enumIs = !untyped __cpp__("(::hx::Class({0}))->__IsEnum()", t);
+		#end
+		return enumIs;
+	}
+
+	public static function isEnum(t:Dynamic):Bool
+	{
+		if( t == null )
+			return false;
+
+		var enumIs = Std.isOfType(t, Enum);
+		#if cpp
+		if( enumIs )
+			enumIs = untyped __cpp__("(::hx::Class({0}))->__IsEnum()", t);
+		#end
+		return enumIs;
+	}
+
+	public static function classOrEnum(t:Dynamic):String
+	{
+		if (isClass(t))
+			return "class";
+		if (isEnum(t))
+			return "enum";
+
+		return "object";
+	}
+
+	public static function isClassOrEnum(t:Dynamic):Bool
+	{
+		return isClass(t) || isEnum(t);
+	}
+
+	#if (!DISABLED_MACRO_SUPERLATIVE && !python)
     macro static function build() 
     {
         Context.onGenerate(function(types) 

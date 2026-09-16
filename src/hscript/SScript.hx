@@ -1,5 +1,6 @@
 package hscript;
 
+import haxe.ds.StringMap;
 import haxe.Exception;
 import haxe.Timer;
 
@@ -13,6 +14,10 @@ import sys.io.File;
 
 import hscript.backend.*;
 import hscript.backend.Preset.PresetMode;
+import hscript.backend.HScriptSandbox;
+import hscript.backend.HScriptSandbox.HScriptLib;
+import hscript.backend.HScriptSandbox.HScriptSandboxSettings;
+
 
 using StringTools;
 
@@ -109,6 +114,8 @@ typedef FunctionCall =
 @:keepSub
 class SScript
 {
+	public static final SSCRIPT_VERSION:String = "23.0.0";
+	
 	/**
 		If not null, enables the improved field system for every script.
 		
@@ -120,12 +127,12 @@ class SScript
 		`trace(sys.FileSystem.exists("hscript/SScript.hx")); // true` 
 
 		This may be exhausting for old computers since it uses Reflection. 
-		Don't set this to true if you experience performance problems.
+		Set this to false if you experience performance problems.
 	**/
-	public static var defaultImprovedField:Null<Bool> = false;
+	public static var defaultImprovedField:Null<Bool> = true;
 
 	/**
-		If not null, enables debug traces for `doString` and `new()`. 
+		If not null, enables debug traces for `execute`, `doString` and `new()`. 
 
 		@see `debugTraces`
 	**/
@@ -159,6 +166,14 @@ class SScript
 		Default is `"main"`.
 	**/
 	public static var defaultFun:{functionName:String, ?arguments:Array<Dynamic>} = {functionName: "main"};
+	
+	/**
+		If not null, sets the initial value of `interpCompilesFunctionCode` for
+		every SScript instance created afterwards.
+
+		@see `interpCompilesFunctionCode`
+	**/
+	public static var defaultCompile:Null<Bool> = null;
 
 	/**
 		Every created SScript instance will be stored in this map.
@@ -173,8 +188,15 @@ class SScript
 		Variables in this map will get set to all created SScript instance.
 	**/
 	public static var globalVariables(default, null):Map<String, Dynamic> = [];
+
+	/**
+		Parser instance **only** used to parse interpolated strings.
+	**/
+	public static final stringParser:Parser = new Parser();
 	
 	static var IDCount(default, null):Int = 0;
+
+	static final scriptCache:StringMap<Expr> = new StringMap();
 	
 	/**
 		Script-specific default function name.
@@ -184,13 +206,43 @@ class SScript
 	public var defaultFunc:{functionName:String, ?arguments:Array<Dynamic>} = null;
 
 	/**
-		If not null, enables the improved field system for this script.
-
-		Disabled by default.
+		If true, enables the improved field system for this script.
 
 		@see `SScript.defaultImprovedField`
 	**/
-	public var improvedField(default, set):Bool = false;
+	public var improvedField(default, set):Bool = true;
+
+	/**
+		Whether this script's functions are compiled into closures the
+		first time they're called.
+
+		When `true`, a function's body is compiled once, 
+		which is then cached and reused for every call to that same
+		function. This trades a one-time, per-function build cost for a
+		cheaper path on every call afterwards.
+
+		That trade only pays off once a function is called often enough 
+		(e.g. hundreds or thousands of calls, or a function that runs every frame). 
+		For a function called once or twice, interpreted mode is slightly faster,
+		since it skips the compilation step entirely.
+
+		Interpreter will not compile any code other than function code,
+		so this option has no effect on scripts that have no functions in it.
+		It will not compile functions that lack a name, either.
+
+		@see `SScript.defaultCompile`
+	**/
+	public var interpCompilesFunctionCode(default, set):Bool = true;
+
+	#if cpp
+	/**
+		Whether in compiled functions, local variables are cached and the latest one is used
+		instead of re-evaluating local variables, making scripts run faster.
+
+		This feature is available in **C++ only**, and has no effect if `interpCompilesFunctionCode` is `false`.
+	**/
+	public var interpCachesCompiledLocals(default, set):Bool = true;
+	#end
 
 	/**
 		A custom origin you can assign to this script.
@@ -221,6 +273,8 @@ class SScript
 	/**
 		Used by `set`. If a class is assigned while listed here,
 		an exception will be thrown.
+
+		Has no effect since version `23.0.0`.
 	**/
 	public var notAllowedClasses(default, null):Array<Class<Dynamic>> = [];
 
@@ -240,9 +294,80 @@ class SScript
 		Main interpreter responsible for executing this script.
 
 		Do NOT modify `interp.variables` directly.
-		Use `set()` instead.
+		Use `set()` or `remove()` instead.
 	**/
 	public var interp(default, null):Interp;
+
+	/**
+		Whether this script is sandboxed.
+
+		A sandboxed script can't name its way to a class it wasn't explicitly
+		given: no `new sys.io.File()`, no `Sys.systemName()`, no `import sys.FileSystem;`, 
+		no `sys.io.File.getContent(path)`, no `using` a foreign
+		class. Whichever `hscript.backend.HScriptSandbox.HScriptLib` categories
+		are set in `hscriptBlockedLibs` are unreachable that way. It's also bounded
+		by `hscriptInstructionLimit` and `hscriptTimeLimitMs`, so something like a `while(true){}` can't hang the host.
+
+		This is **not** an OS-level sandbox. It restricts implicit class
+		resolution by string, not what you set into the script yourself. Anything you expose that way is
+		reachable from a sandboxed script exactly as it would be from a normal
+		one.
+
+		Re-applied every time `execute()` runs, so it's safe to flip this (and
+		other options) between calls to `execute()` on the same instance.
+
+		Defaults to `false`.
+
+		@see `hscript.backend.HScriptSandbox.HScriptLib`
+	**/
+	public var hscriptSandboxed:Bool = false;
+
+	/**
+		Bitmask of `hscript.backend.HScriptSandbox.HScriptLib` flags controlling
+		which categories of implicit class access are blocked when
+		`hscriptSandboxed` is `true`. Ignored when `hscriptSandboxed` is `false`.
+
+		Defaults to `HScriptLib.SANDBOX_DEFAULT` (every category blocked).
+	**/
+	public var hscriptBlockedLibs:Int = HScriptLib.SANDBOX_DEFAULT;
+
+	/**
+		Additional dotted class paths (or package prefixes) to block regardless
+		of `hscriptBlockedLibs`, e.g. `["my.pkg.Secrets"]`. Checked before
+		`hscriptBlockedLibs`, and after `hscriptExtraAllowedClasses`.
+
+		Ignored when `hscriptSandboxed` is `false`.
+	**/
+	public var hscriptExtraBlockedClasses:Array<String> = [];
+
+	/**
+		Dotted class paths (or package prefixes) to always allow, even if their
+		category would otherwise be blocked by `hscriptBlockedLibs`. Checked
+		before `hscriptExtraBlockedClasses`/`hscriptBlockedLibs`.
+
+		Ignored when `hscriptSandboxed` is `false`.
+	**/
+	public var hscriptExtraAllowedClasses:Array<String> = [];
+
+	/**
+		Rough budget on how many expressions a sandboxed script may evaluate
+		(checked periodically as the script runs) before it's aborted.
+
+		`<= 0` disables the check. Ignored unless `hscriptSandboxed` is `true`.
+
+		Defaults to `-1`.
+	**/
+	public var hscriptInstructionLimit:Int = -1;
+
+	/**
+		Rough wall-clock budget in milliseconds for a sandboxed script, checked
+		on the same periodic check as `hscriptInstructionLimit`.
+
+		`<= 0` disables the check. Ignored unless `hscriptSandboxed` is `true`.
+
+		Defaults to `-1`.
+	**/
+	public var hscriptTimeLimitMs:Int = -1;
 
 	/**
 		Parser instance used to parse scripts.
@@ -272,7 +397,21 @@ class SScript
 	public var traces:Bool = false;
 
 	/**
-		If true, enables debug traces from `doString`.
+		If true, prints one line every time this script is
+		(re-)executed, via `execute()`, `doString()`, or the constructor.
+
+		Each line reports which script it was, which method
+		ran it, how long it took, and the outcome: the resulting
+		`returnValue` on success, or the caught exception's message on
+		failure. For example:
+
+		`[SScript #3] doString() ran in 0.0002s -> returned 3`
+
+		`[SScript (script.hx)] execute() ran in 0.0011s -> failed: Unknown variable: a`
+
+		Useful for spotting slow scripts or silent parsing failures without
+		having to manually check `parsingException` after
+		every call.
 	**/
 	public var debugTraces:Bool = false;
 
@@ -292,18 +431,34 @@ class SScript
 	public var packagePath(get, null):String = "";
 
 	var shouldWarn:Bool = true;
-
+	var reportTrace:Bool = true;
 	@:noPrivateAccess var _destroyed(default, null):Bool;
 
 	/**
 		Creates a new SScript instance.
-
-		@param scriptPath Script file path or raw hscript code.
-		@param preset Whether to apply default preset variables.
+		
+		@param scriptPath The script file path or raw hscript code.
+		@param preset Whether to apply the default preset variables.
 		@param startExecute Whether to execute the script immediately. (Recommended)
+		@param variablesToSet If not null or empty, sets the variables passed to this script before applying `preset`, regardless of the value of argument `preset`.
+		@param hscriptSandbox If not null, sandboxes this script according to `hscriptSandboxed`'s documentation. Equivalent to setting `hscriptSandboxed = true` plus whichever fields of `HScriptSandboxSettings` you pass. Has no effect if `startExecute` is false; set the properties directly before calling `execute()` in that case.
 	**/
-	public function new(?scriptPath:String = "", ?preset:Bool = true, ?startExecute:Bool = true)
+	public function new(?scriptPath:String = "", ?preset:Bool = true, ?startExecute:Bool = true, ?variablesToSet:Array<{name:String, ?variable:Dynamic, ?isFinal:Bool}>, ?hscriptSandbox:HScriptSandboxSettings)
 	{
+		if (hscriptSandbox != null) {
+			hscriptSandboxed = true;
+			if (hscriptSandbox.blockedLibs != null)
+				this.hscriptBlockedLibs = hscriptSandbox.blockedLibs;
+			if (hscriptSandbox.extraBlockedClasses != null)
+				this.hscriptExtraBlockedClasses = hscriptSandbox.extraBlockedClasses;
+			if (hscriptSandbox.extraAllowedClasses != null)
+				this.hscriptExtraAllowedClasses = hscriptSandbox.extraAllowedClasses;
+			if (hscriptSandbox.instructionLimit != null)
+				this.hscriptInstructionLimit = hscriptSandbox.instructionLimit;
+			if (hscriptSandbox.timeLimitMs != null)
+				this.hscriptTimeLimitMs = hscriptSandbox.timeLimitMs;
+		}
+
 		var time = Timer.stamp();
 
 		if (defaultDebug != null)
@@ -315,13 +470,33 @@ class SScript
 
 		interp = new Interp();
 		interp.setScr(this);
+
+		if (defaultCompile != null)
+			interpCompilesFunctionCode = defaultCompile;
+		else
+			interpCompilesFunctionCode = true;
 		
 		if (defaultImprovedField != null)
 			improvedField = defaultImprovedField;
 		else 
-			improvedField = false;
+			improvedField = true;
 
 		parser = new Parser();
+
+		if (variablesToSet != null && variablesToSet.length > 0)
+		{
+			for (i in variablesToSet) 
+			{
+				var name = i.name;
+				var v = i.variable;
+				var f = i.isFinal;
+
+				if (name != null)
+				{
+					set(name, v, f);
+				}
+			}
+		}
 
 		presetMode = defaultPreset;
 		if (preset)
@@ -341,17 +516,14 @@ class SScript
 		try 
 		{
 			doFile(scriptPath);
+			reportTrace = false;
 			if (startExecute)
 				execute();
+			reportTrace = true;
 			lastReportedTime = Timer.stamp() - time;
 
-			if (debugTraces && scriptPath != null && scriptPath.length > 0)
-			{
-				if (lastReportedTime == 0)
-					trace('Script executed instantly (0 seconds)');
-				else 
-					trace('Script executed in ${lastReportedTime} seconds');
-			}
+			if (startExecute && scriptPath != null && scriptPath.length > 0)
+				debugTrace("new()");
 		}
 		catch (e)
 		{
@@ -373,13 +545,15 @@ class SScript
 
 		parsingException = null;
 
+		var time = Timer.stamp();
+
 		var origin:String = {
 			if (customOrigin != null && customOrigin.length > 0)
 				customOrigin;
 			else if (scriptFile != null && scriptFile.length > 0)
 				scriptFile;
 			else 
-				"SScript";
+				toString();
 		};
 
 		if (script != null && script.length > 0)
@@ -390,7 +564,14 @@ class SScript
 			{
 				try 
 				{
-					var expr:Expr = parser.parseString(script, origin);
+					var expr:Expr = null;
+					if (scriptCache.exists(script))
+						expr = scriptCache.get(script);
+					else 
+					{
+						expr = parser.parseString(script, origin);
+						scriptCache.set(script, expr);
+					}
 					var r = interp.execute(expr);
 					returnValue = r;
 				}
@@ -398,6 +579,7 @@ class SScript
 				{
 					parsingException = e;				
 					returnValue = null;
+					scriptCache.remove(script);
 				}
 				
 				if (defaultFunc != null) 
@@ -410,6 +592,43 @@ class SScript
 			
 			tryHaxe();
 		}
+
+		lastReportedTime = Timer.stamp() - time;
+		if (reportTrace)
+			debugTrace("execute()");
+	}
+
+	function debugTrace(calledFrom:String):Void
+	{
+		if (!debugTraces)
+			return;
+
+		var buf = new StringBuf();
+		buf.add(toString());
+		buf.add(" ");
+		buf.add(calledFrom);
+		buf.add(" ran in ");
+		buf.add(Std.string(lastReportedTime));
+		buf.add("s -> ");
+
+		if (parsingException != null)
+		{
+			buf.add("failed: ");
+			buf.add(parsingException.message);
+		}
+		else
+		{
+			if (returnValue == null)
+				buf.add("it was a success and didn't return anything");
+			else 
+			{
+				buf.add("it was a success and returned ");
+				buf.add(Std.string(returnValue));
+			}
+		}
+
+		var bufS = buf.toString();
+		trace(bufS);
 	}
 
 	/**
@@ -429,31 +648,18 @@ class SScript
 		if (!active)
 			return this;
 		
-		if (key == null || key.trim().length == 0) {
-			traceError('$key is not a valid class name', "set", [key, obj, setAsFinal]);
-			return this;
-		}
-		else if (obj != null && (obj is Class) && notAllowedClasses.contains(obj)) {
-			traceError('Tried to set ${Type.getClassName(obj)} which is not allowed', 'set', [key, obj, setAsFinal]);
-			return this;
-		}
-		else if (Tools.keys.contains(key)) {
-			traceError('$key is a keyword and cannot be replaced', "set", [key, obj, setAsFinal]);
-			return this;
-		}
-
-		if (setAsFinal == null)
-			setAsFinal = obj != null && (Std.isOfType(obj, Class));
-
-		function setVar(key:String, obj:Dynamic):Void
+		if (key == null) 
 		{
-			if (setAsFinal)
-				interp.finalVariables[key] = obj;
-			else
-				interp.variables[key] = obj;
+			traceError('$key is not a valid variable name', "set", [key, obj, setAsFinal]);
+			return this;
 		}
+		else if (Tools.keys.exists(key))
+		{
+			traceError('$key is not a keyword therefore cannot be set', "set", [key, obj, setAsFinal]);
+			return this;
+		}
+		interp.variables[key] = { r : obj , isFinal : setAsFinal };
 
-		setVar(key, obj);
 		return this;
 	}
 
@@ -465,7 +671,7 @@ class SScript
 		the object will act as a final variable and cannot be changed in the script.
 		@return this instance for chaining.
 	**/
-	public function setClass(cl:Class<Dynamic>, ?setAsFinal:Bool = null):SScript
+	public function setClass(cl:Class<Dynamic>, ?setAsFinal:Bool):SScript
 	{
 		if (_destroyed)
 			return null;
@@ -498,14 +704,63 @@ class SScript
 	}
 
 	/**
+		This is a helper function for setting enums easily.
+		For example, if `en` is the `Type.ValueType` enum, it will be set as `ValueType`.
+
+		All of the enum's constructors are also set, for example `Type.ValueType.TClass(_)` will be set as `TClass`.
+		@param en The enum to set.
+		@param setAsFinal Whether to set the object as final. If set as final,
+		the object will act as a final variable and cannot be changed in the script.
+		@param includeAllEnumConstructors If true, all constructors in this enum will also be set in the script.
+		@return this instance for chaining.
+	**/
+	public function setEnum(en:Enum<Dynamic>, ?setAsFinal:Bool, ?includeAllEnumConstructors:Bool = true):SScript
+	{
+		if (_destroyed)
+			return null;
+		
+		if (en == null)
+		{
+			if (traces)
+			{
+				traceError('Enum cannot be null', 'setClass', [en, setAsFinal]);
+			}
+
+			return this;
+		}
+
+		if (setAsFinal == null)
+			setAsFinal = en != null;
+
+		var clName:String = Type.getEnumName(en);
+		if (clName != null)
+		{
+			var splitCl:Array<String> = clName.split('.');
+			if (splitCl.length > 1)
+			{
+				clName = splitCl[splitCl.length - 1];
+			}
+
+			set(clName, en, setAsFinal);
+
+			if (includeAllEnumConstructors)
+			{
+				for (i in Type.getEnumConstructs(en))
+					set(i, Reflect.field(en, i), setAsFinal);
+			}
+		}
+		return this;
+	}
+
+	/**
 		Sets a class in this script from a string.
 		`cl` will be formatted. (e.g., `sys.io.File` -> `File`)
 		@param cl The class to set.
 		@param setAsFinal Whether to set the object as final. If set as final,
-		the object will act as a final variable and cannot be changed in the script.
+		the object will act as a final variable and cannot be changed in the script. 
 		@return this instance for chaining.
 	**/
-	public function setClassString(cl:String, ?setAsFinal:Bool = null):SScript
+	public function setClassString(cl:String, ?setAsFinal:Bool):SScript
 	{
 		if (_destroyed)
 			return null;
@@ -533,7 +788,7 @@ class SScript
 		return this;
 	}
 
-	#if !DISABLED_MACRO_SUPERLATIVE
+	#if (!DISABLED_MACRO_SUPERLATIVE && !python)
 	/**
 		Sets multiple classes in this script from the provided package.
 
@@ -543,7 +798,7 @@ class SScript
 		the classes will act as a final variable and cannot be changed in the script.
 		@return this instance for chaining.
 	**/
-	public function setByPackage(_package:String, ?recursive:Bool = true, ?setAsFinal:Bool = null):SScript 
+	public function setByPackage(_package:String, ?recursive:Bool = true, ?setAsFinal:Bool):SScript 
 	{
 		if (_destroyed)
 			return null;
@@ -593,7 +848,7 @@ class SScript
 		the classes will act as a final variable and cannot be changed in the script.
 		@return this instance for chaining.
 	**/
-	public function setByPackage(_package:String, ?recursive:Bool = true, ?setAsFinal:Bool = null):SScript 
+	public function setByPackage(_package:String, ?recursive:Bool = true, ?setAsFinal:Bool):SScript 
 	{
 		return this;
 	}
@@ -700,8 +955,8 @@ class SScript
 		if (!active)
 			return this;
 
-		if (interp.finalVariables.exists(key))
-			interp.finalVariables.remove(key);
+		if (interp.locals.exists(key))
+			interp.locals.remove(key);
 		if (interp.variables.exists(key))
 			interp.variables.remove(key);
 
@@ -733,17 +988,14 @@ class SScript
 			if (traces)
 				traceError("This script is not active!", "get");
 
-			return this;
+			return null;
 		}
 
 		if (interp.locals.exists(key))
        		return interp.locals.get(key).r;
 
-		var r = interp.finalVariables.get(key);
-		if (r == null)
-			r = interp.variables.get(key);
-
-		return r;
+		var r = interp.variables.get(key);
+		return r != null ? r.r : null;
 	}
 
 	/**
@@ -761,7 +1013,7 @@ class SScript
 	{
 		if (_destroyed)
 			return {
-				exceptions: [new Exception((if (scriptFile != null && scriptFile.length > 0) scriptFile else "SScript instance") + " is destroyed.")],
+				exceptions: [new Exception(toString() + " is destroyed.")],
 				calledFunction: func,
 				succeeded: false,
 				returnValue: null,
@@ -770,7 +1022,7 @@ class SScript
 
 		if (!active)
 			return {
-				exceptions: [new Exception((if (scriptFile != null && scriptFile.length > 0) scriptFile else "SScript instance") + " is not active.")],
+				exceptions: [new Exception(toString() + " is not active.")],
 				calledFunction: func,
 				succeeded: false,
 				returnValue: null,
@@ -780,53 +1032,67 @@ class SScript
 		var time:Float = Timer.stamp();
 
 		var scriptFile:String = if (scriptFile != null && scriptFile.length > 0) scriptFile else "";
-		var caller:UnlockedFunctionCall = {
-			exceptions: [],
-			calledFunction: func,
-			succeeded: false,
-			returnValue: null,
-			lastReportedTime: -1
-		}
+
 		if (args == null)
 			args = new Array();
 
-		var pushedExceptions:Array<String> = new Array();
-		function pushException(e:String)
-		{
-			if (!pushedExceptions.contains(e))
-				caller.exceptions.push(new Exception(e));
-			
-			pushedExceptions.push(e);
-		}
 		if (func == null || func.trim().length == 0)
 		{
 			if (traces)
 				traceError('Function name cannot be invalid', 'call', [func, args]);
 
-			pushException('Function name cannot be invalid' + ((scriptFile != null && scriptFile.length > 0) ? 'for $scriptFile!' : ''));
-			return caller;
+			return {
+				exceptions: [new Exception('Function name cannot be invalid' + ((scriptFile != null && scriptFile.length > 0) ? 'for $scriptFile!' : ''))],
+				calledFunction: func,
+				succeeded: false,
+				returnValue: null,
+				lastReportedTime: -1
+			};
 		}
-		
+
 		var fun = get(func);
+		var caller:UnlockedFunctionCall;
 		if (fun != null && Type.typeof(fun) != TFunction)
 		{
 			if (traces)
 				traceError('$func is not a function', 'call', [func, args]);
 
-			pushException('$func is not a function');
+			caller = {
+				exceptions: [new Exception('$func is not a function')],
+				calledFunction: func,
+				succeeded: false,
+				returnValue: null,
+				lastReportedTime: -1
+			};
 		}
 		else if (fun == null)
 		{
 			if (traces)
 				traceError('Function $func does not exist', "call", [func, args]);
 
-			pushException('Function $func does not exist in ${toString()}.');
+			caller = {
+				exceptions: [new Exception('Function $func does not exist in ${toString()}.')],
+				calledFunction: func,
+				succeeded: false,
+				returnValue: null,
+				lastReportedTime: -1
+			};
 		}
 		else 
 		{
+			caller = {
+				exceptions: [],
+				calledFunction: func,
+				succeeded: false,
+				returnValue: null,
+				lastReportedTime: -1
+			};
 			var oldCaller = caller;
 			try
 			{
+				if (hscriptSandboxed && interp != null)
+					interp.resetSandboxLimiter();
+
 				var functionField:Dynamic = Reflect.callMethod(this, fun, args);
 				caller = {
 					exceptions: caller.exceptions,
@@ -861,11 +1127,11 @@ class SScript
 		if (!active)
 			return this;
 
-		for (i in interp.variables.keys())
-				interp.variables.remove(i);
+		for (i in [for (k in interp.locals.keys()) k])
+			interp.locals.remove(i);
 
-		for (i in interp.finalVariables.keys())
-			interp.finalVariables.remove(i);
+		for (i in [for (k in interp.variables.keys()) k])
+			interp.variables.remove(i);
 
 		return this;
 	}
@@ -886,8 +1152,6 @@ class SScript
 
 		if (interp.locals.exists(key))
         	return true;
-		if (interp.finalVariables.exists(key))
-			return true;
 		if (interp.variables.exists(key))
 			return true;
 
@@ -898,7 +1162,9 @@ class SScript
 		Sets useful default variables to make this script easier to use.
 		Override this function to set your custom values as well.
 
-		Don't forget to call `super.preset()`!
+		Sandboxed scripts don't get preset values, but you can still override this and put in your own variables.
+
+		Don't forget to call `super.preset()` (at the top of the overriden function)!
 	**/
 	public function preset():Void
 	{
@@ -907,7 +1173,8 @@ class SScript
 		if (!active)
 			return;
 
-		Preset.preset(this);
+		if (!hscriptSandboxed)
+			Preset.preset(this);
 	}
 
 	function resetInterp():Void
@@ -918,6 +1185,14 @@ class SScript
 		interp.locals = new Map();
 		while (interp.declared.length > 0)
 			interp.declared.pop();
+
+		interp.compiledExprFuncCache.clear();
+
+		if (hscriptSandboxed)
+			HScriptSandbox.apply(interp, hscriptBlockedLibs, hscriptExtraBlockedClasses, hscriptExtraAllowedClasses, hscriptInstructionLimit,
+				hscriptTimeLimitMs);
+		else
+			HScriptSandbox.remove(interp);
 	}
 
 	function destroyInterp():Void 
@@ -925,12 +1200,13 @@ class SScript
 		if (_destroyed)
 			return;
 
+		interp.interpStringExprCache = null;
+		interp.compiledExprFuncCache = null;
 		interp.specialObject = null;
 		interp.usingMethods = null;
 		interp.script = null;
 		interp.locals = null;
 		interp.variables = null;
-		interp.finalVariables = null;
 		interp.declared = null;
 	}
 
@@ -978,7 +1254,6 @@ class SScript
 				useIDForGlobal();
 		}
 	}
-
 	/**
 		Executes a string once instead of a script file.
 
@@ -997,7 +1272,7 @@ class SScript
 			return null;
 		if (!active)
 			return this;
-		if (string == null || string.length < 1 || StringTools.trim(string).length == 0)
+		if (string == null || string.trim().length == 0)
 			return this;
 
 		parsingException = null;
@@ -1020,7 +1295,7 @@ class SScript
 			if (og == null || og.length < 1)
 				og = customOrigin;
 			if (og == null || og.length < 1)
-				og = "SScript";
+				og = toString();
 
 			resetInterp();
 		
@@ -1060,14 +1335,7 @@ class SScript
 			tryHaxe();	
 			
 			lastReportedTime = Timer.stamp() - time;
- 
-			if (debugTraces)
-			{
-				if (lastReportedTime == 0)
-					trace('SScript instance brewed instantly (0s)');
-				else 
-					trace('SScript instance brewed in ${lastReportedTime}s');
-			}
+			debugTrace("doString()");
 		}
 		catch (e) lastReportedTime = -1;
 
@@ -1077,9 +1345,11 @@ class SScript
 	/**
 		Converts this instance of SScript to a String and returns it.
 
-		For scripts without a file, it will use its `ID`. (e.g, "[SScript #618]")
+		For scripts without a file, it will use its `ID`. (e.g, "`[SScript #618]`")
 
-		For scripts with a file, it will use the file name. (e.g, "[SScript (script.hx)]")
+		For scripts with a file, it will use the file name. (e.g, "`[SScript (script.hx)]`")
+
+		Sandboxed scripts will be labeled as "SScript Sandboxed". (e.g, "`[SScript Sandboxed #618]`")
 
 		@return This SScript instance as a string.
 	**/
@@ -1088,10 +1358,12 @@ class SScript
 		if (_destroyed)
 			return "null";
 
-		if (scriptFile != null && scriptFile.length > 0)
-			return "[SScript (" + scriptFile + ")]";
+		var sandboxed = hscriptSandboxed;
 
-		return "[SScript" + (ID != null ? (" #" + ID) : "") + "]";
+		if (scriptFile != null && scriptFile.length > 0 && StringTools.trim(scriptFile).length > 0) 
+			return (sandboxed ? "[SScript Sandboxed" : "[SScript") + " (" + scriptFile + ")]";
+
+		return (sandboxed ? "[SScript Sandboxed" : "[SScript") + (ID != null ? (" #" + ID) : "") + "]";
 	}
 
 	#if sys
@@ -1160,7 +1432,7 @@ class SScript
 		if (_destroyed)
 			return;
 
-		if (global.exists(scriptFile) && scriptFile != null && scriptFile.length > 0)
+		if (scriptFile != null && scriptFile.length > 0 && global.exists(scriptFile))
 			global.remove(scriptFile);
 		if (ID != null && global.exists(Std.string(ID)))
 			global.remove(Std.string(ID));
@@ -1184,7 +1456,7 @@ class SScript
 		_destroyed = true;
 	}
 
-	function traceError(error:String, funcCalled:String, ?args:Array<Dynamic>)
+	public dynamic function traceError(error:String, funcCalled:String, ?args:Array<Dynamic>)
 	{
 		if (!shouldWarn)
 			return;
@@ -1251,7 +1523,7 @@ class SScript
 
 	static var showedWarning:Bool = false;
 	static function set_defaultPreset(value:PresetMode):PresetMode {
-		#if !DISABLED_MACRO_SUPERLATIVE
+		#if (!DISABLED_MACRO_SUPERLATIVE && !python)
 		if (value == FULL && !showedWarning) {
 			trace("You set preset mode to FULL, which contains all existing classes.");
 			trace("If you're handling a lot of scripts, this can get very expensive.");
@@ -1269,4 +1541,23 @@ class SScript
 			return null;
 		return presetMode = value;
 	}
+
+	function set_interpCompilesFunctionCode(value:Bool):Bool {
+		if (_destroyed)
+			return false;
+		if (interp == null)
+			return value;
+		interp.compiled = value;
+		return interpCompilesFunctionCode = value;
+	}
+
+	#if cpp
+	function set_interpCachesCompiledLocals(value:Bool):Bool {
+		if (_destroyed)
+			return false;
+		if (interp != null)
+			interp.cppLocalCacheEnabled = value;
+		return interpCachesCompiledLocals = value;
+	}
+	#end
 }

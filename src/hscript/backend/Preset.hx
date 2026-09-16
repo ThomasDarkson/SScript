@@ -8,7 +8,7 @@ enum PresetMode
     NONE;
     MINI;
     REGULAR;
-    #if !DISABLED_MACRO_SUPERLATIVE
+    #if (!DISABLED_MACRO_SUPERLATIVE && !python)
     FULL;
     #end
 }
@@ -25,7 +25,7 @@ class Preset
         var hArray = switch script.presetMode {
             case MINI: PresetClasses.miniHaxe;
             case REGULAR: PresetClasses.regularHaxe;
-            #if !DISABLED_MACRO_SUPERLATIVE
+            #if (!DISABLED_MACRO_SUPERLATIVE && !python)
             case FULL: PresetClasses.fullHaxe;
             #end
             default: [];
@@ -46,8 +46,7 @@ class PresetClasses
 
     static var regularHaxe:Array<Class<Dynamic>> = {
         var array = miniHaxe.copy();
-        var array2:Array<Class<Dynamic>> = [
-            EReg, List, StringBuf, Xml,
+        var array2:Array<Class<Dynamic>> = [List, StringBuf, Xml,
             haxe.Http, haxe.Json, haxe.Log, haxe.Serializer, haxe.Unserializer, haxe.Timer,
             #if sys haxe.SysTools, sys.io.Process, sys.io.FileInput, sys.io.FileOutput #end
         ];
@@ -58,7 +57,7 @@ class PresetClasses
         array;
     }
 
-    #if !DISABLED_MACRO_SUPERLATIVE
+    #if (!DISABLED_MACRO_SUPERLATIVE && !python)
     static var fullHaxe:Array<Class<Dynamic>> = byMap();
 
     static function byMap():Array<Class<Dynamic>> {
