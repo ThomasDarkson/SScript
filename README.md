@@ -430,18 +430,6 @@ class Main {
 }
 ```
 
-## Cached Compiled Locals (C++ only)
-On the C++ target, compiled functions can cache locals variables instead of looking them up on every access, with
-`interpCachesCompiledLocals` (defaults to `true`). The cache changes automatically
-whenever the active local variable actually changes, so this is safe to leave on. It has no effect if compiled functions are disabled, and **this feature is available on C++ only.**
-
-```haxe
-var script = new SScript();
-#if cpp
-script.interpCachesCompiledLocals = false;
-#end
-```
-
 ## Presetting System
 Presets are the variables that get set before the script gets executed. 
 

@@ -41,28 +41,17 @@ private enum SScriptNull {
 	Not_NULL;
 }
 
-@:keepSub
-@:access(hscriptBase.Parser)
-@:access(hscript.SScript)
-class LocalRef {
-	public var r:Dynamic;
-	public var isFinal:Bool;
-
-	public inline function new(r:Dynamic, isFinal:Bool = false) {
-		this.r = r;
-		this.isFinal = isFinal;
-	}
-}
-
 class Interp {
 	static final defaultVariables:Array<String> = ["null", "true", "false", "trace", "Bool", "Int", "Float", "String", "Dynamic", "Array"];
-	public var variables : Map<String,{ r : Dynamic, ?isFinal : Bool }>;
-	var locals : Map<String,LocalRef>;
+	public var variables : Map<String,Dynamic>;
+	public var finalVariables : Map<String,Dynamic>;
+	var locals : Map<String,Dynamic>;
+	var localsOuter : Array<Map<String,Dynamic>>;
 	var binops : Map<String, Expr -> Expr -> Dynamic >;
 
 	var depth : Int;
 	var inTry : Bool;
-	var declared : Array<{ n : String, old : LocalRef }>;
+	var declared : Array<{ n : String, old : Dynamic }>;
 	var returnValue : Dynamic;
 
 	var privateAccess : Bool = false;
@@ -92,29 +81,6 @@ class Interp {
 	var compiled = false;
 
 	var compiledExprFuncCache : StringMap< Void -> Dynamic > = new StringMap();
-
-	#if cpp
-	public var cppLocalCacheEnabled : Bool = true;
-	var localGeneration : Int = 0;
-
-	inline function resetLocalRefs() : Void {
-		localGeneration++;
-	}
-	#end
-
-	inline function setLocal(name:String, value:LocalRef) : Void {
-		#if cpp
-		localGeneration++;
-		#end
-		locals.set(name, value);
-	}
-
-	inline function removeLocal(name:String) : Void {
-		#if cpp
-		localGeneration++;
-		#end
-		locals.remove(name);
-	}
 
 	public inline function setScr(s)
 	{
@@ -162,6 +128,7 @@ class Interp {
 
 	public function new() {
 		locals = new Map();
+		localsOuter = null;
 		declared = new Array();
 		resetVariables();
 		initOps();
@@ -169,22 +136,23 @@ class Interp {
 
 	private function resetVariables(){
 		variables = new Map();
+		finalVariables = new Map();
 
-		variables.set("null",{ r : null , isFinal: true });
-		variables.set("true",{ r : true , isFinal: true });
-		variables.set("false",{ r : false , isFinal: true });
-		variables.set("trace",{ r : Reflect.makeVarArgs(function(el) {
+		finalVariables.set("null",null);
+		finalVariables.set("true",true);
+		finalVariables.set("false",false);
+		finalVariables.set("trace",Reflect.makeVarArgs(function(el) {
 			var inf = posInfos();
 			var v = el.shift();
 			if( el.length > 0 ) inf.customParams = el;
 			haxe.Log.trace(Std.string(v), inf);
-		}) , isFinal: true });
-		variables.set("Bool", { r : Bool , isFinal: true });
-		variables.set("Int", { r : Int , isFinal: true });
-		variables.set("Float", { r : Float , isFinal: true });
-		variables.set("String", { r : String , isFinal: true });
-		variables.set("Dynamic", { r : Dynamic , isFinal: true });
-		variables.set("Array", { r : Array , isFinal: true });
+		}));
+		finalVariables.set("Bool",Bool);
+		finalVariables.set("Int",Int);
+		finalVariables.set("Float",Float);
+		finalVariables.set("String",String);
+		finalVariables.set("Dynamic",Dynamic);
+		finalVariables.set("Array",Array);
 	}
 
 	public function posInfos(): PosInfos {
@@ -202,11 +170,11 @@ class Interp {
 	function initOps() {
 		var me = this;
 		binops = new Map();
-		binops.set("+",function(e1,e2) return me.expr(e1) + me.expr(e2));
+		binops.set("+",function(e1,e2) return FastBinop.add(me.expr(e1), me.expr(e2)));
 		binops.set("-",function(e1,e2) return me.expr(e1) - me.expr(e2));
 		binops.set("*",function(e1,e2) return me.expr(e1) * me.expr(e2));
 		binops.set("/",function(e1,e2) return me.expr(e1) / me.expr(e2));
-		binops.set("%",function(e1,e2) return me.expr(e1) % me.expr(e2));
+		binops.set("%",function(e1,e2) return FastBinop.mod(me.expr(e1), me.expr(e2)));
 		binops.set("&",function(e1,e2) return me.expr(e1) & me.expr(e2));
 		binops.set("|",function(e1,e2) return me.expr(e1) | me.expr(e2));
 		binops.set("^",function(e1,e2) return me.expr(e1) ^ me.expr(e2));
@@ -286,24 +254,20 @@ class Interp {
 		if( specialObject != null && specialObject.obj != null && specialObjectsFields.contains( name ) ) 
 			Reflect.setProperty(specialObject.obj, name, v);
 		else
-			variables.set(name, { r : v });
+			variables.set(name,v);
 	}
 
 	function assign( e1 : Expr, e2 : Expr ) : Dynamic {
 		var v = expr(e2);
 		switch( Tools.expr(e1) ) {
 		case EIdent(id):
-			if( locals.exists(id) && locals.get(id).isFinal )
-				return error(EInvalidFinal(id));
-			var l = locals.get(id);
-			if( l == null )
+			if( !localExists(id) )
 			{
-				var variable = variables.get(id);
-				if( variable != null && variable.isFinal == true )
+				if( finalVariables.exists(id) )
 					return error(EInvalidFinal(id));
 
 				var i = 0;
-				if( variable == null )
+				if( !variables.exists(id) )
 					i++;
 				if( specialObject != null ) {
 					if ( specialObject.obj != null ) {
@@ -321,7 +285,7 @@ class Interp {
 				setVar(id,v);
 			}
 			else {
-				l.r = v;
+				localSet(id,v);
 			}
 		case EField(e,f,fields):
 			if( improvedField && fields != null && fields.length > 1 )
@@ -356,13 +320,13 @@ class Interp {
 		var v = null;
 		switch( Tools.expr(e1) ) {
 		case EIdent(id):
-			var l = locals.get(id);
-			var current : Dynamic = l != null ? l.r : expr(e1);
+			var l = localExists(id);
+			var current : Dynamic = l ? localGet(id) : expr(e1);
 			v = fop(current,expr(e2));
-			if( l == null )
-				setVar(id,v)
+			if( !l )
+				setVar(id,v);
 			else
-				l.r = v;
+				localSet(id,v);
 		case EField(e,f,fields):
 			var r = null;	
 			if( improvedField && fields != null && fields.length > 1 )
@@ -389,17 +353,16 @@ class Interp {
 
 	function increment( e : Expr, prefix : Bool, delta : Int ) : Dynamic {
 		curExpr = e;
-		var oldExpr = e;
 		var e = e.e;
 		switch(e) {
 		case EIdent(id):
-			var l = locals.get(id);
-			var v : Null<Dynamic> = (l == null) ? resolve(id) : l.r;
+			var l = localExists(id);
+			var v : Null<Dynamic> = (l) ? localGet(id) : resolve(id);
 			if( prefix ) {
 				v = FastBinop.addInt(v, delta);
-				if( l == null ) setVar(id,v) else l.r = v;
+				if( !l ) setVar(id,v); else localSet(id,v);
 			} else
-				if( l == null ) setVar(id,FastBinop.addInt(v, delta)) else l.r = FastBinop.addInt(v, delta);
+				if( !l ) setVar(id,FastBinop.addInt(v, delta)) else localSet(id,FastBinop.addInt(v, delta));
 			return v;
 		case EField(e,f,fields):
 			var r = null;	
@@ -446,10 +409,8 @@ class Interp {
 	public function execute( expr : Expr ) : Dynamic {
 		depth = 0;
 		locals = new Map();
+		localsOuter = null;
 		declared = new Array();
-		#if cpp
-		resetLocalRefs();
-		#end
 		if( sandboxed )
 			resetSandboxLimiter();
 		switch Tools.expr(expr){
@@ -541,6 +502,30 @@ class Interp {
 		return h2;
 	}
 
+	function localExists( id : String ) : Bool {
+		if( locals.exists(id) ) return true;
+		if( localsOuter != null )
+			for( m in localsOuter )
+				if( m.exists(id) ) return true;
+		return false;
+	}
+
+	function localGet( id : String ) : Dynamic {
+		if( locals.exists(id) ) return locals.get(id);
+		if( localsOuter != null )
+			for( m in localsOuter )
+				if( m.exists(id) ) return m.get(id);
+		return null;
+	}
+
+	function localSet( id : String, v : Dynamic ) : Void {
+		if( locals.exists(id) ) { locals.set(id, v); return; }
+		if( localsOuter != null )
+			for( m in localsOuter )
+				if( m.exists(id) ) { m.set(id, v); return; }
+		locals.set(id, v);
+	}
+
 	/*function restore( old : Int ) {
 		while( declared.length > old ) {
 			var d = declared.pop();
@@ -552,17 +537,9 @@ class Interp {
 		while( declared.length > old ) {
 			var d = declared.pop();
 			if( d.old == null )
-				#if cpp
-				removeLocal(d.n);
-				#else
 				locals.remove(d.n);
-				#end
 			else
-				#if cpp
-				setLocal(d.n, d.old);
-				#else
-				setLocal(d.n, d.old);
-				#end
+				locals.set(d.n, d.old);
 		}
 	}
 
@@ -591,18 +568,19 @@ class Interp {
 	}
 
 	function resolve( id : String ) : Dynamic { 
-		var l = locals.get(id);
-		if( l != null )
-			return l.r;
+		if( localExists(id) )
+			return localGet(id);
 		if( specialObject != null && specialObject.obj != null && specialObjectsFields.contains(id) )
 		{
 			var field = Reflect.getProperty(specialObject.obj,id);
 			return field;
 		}
-		var v = variables.get(id);
+		var v = finalVariables.get(id);
+		if( v == null )
+			v = variables.get(id);
 		if( v==null )
 			error(EUnknownVariable(id));
-		return v.r;
+		return v;
 	}
 
 	function catchTypeMatches( err : Dynamic, t : Null<CType> ) : Bool {
@@ -764,7 +742,7 @@ class Interp {
 			var name = null;
 
 			declared.push({ n : n, old : locals.get(n) });
-			setLocal(n, new LocalRef(expr1, f));
+			locals.set(n,expr1);
 			return if( strictVar ) error(EUnexpected(f ? "final" : "var")) else null;
 		case EParent(e):
 			return expr(e);
@@ -803,31 +781,48 @@ class Interp {
 				return e2;
 			return null;
 		case EBinop(op,e1,e2):
-			switch(op) {
-				case "+": return FastBinop.add(expr(e1), expr(e2));
-				case "-": return expr(e1) - expr(e2);
-				case "*": return expr(e1) * expr(e2);
-				case "/": return expr(e1) / expr(e2);
-				case "%": return FastBinop.mod(expr(e1), expr(e2));
-				case "&": return expr(e1) & expr(e2);
-				case "|": return expr(e1) | expr(e2);
-				case "^": return expr(e1) ^ expr(e2);
-				case "<<": return expr(e1) << expr(e2);
-				case ">>": return expr(e1) >> expr(e2);
-				case ">>>": return expr(e1) >>> expr(e2);
-				case "==": return expr(e1) == expr(e2);
-				case "!=": return expr(e1) != expr(e2);
-				case ">=": return expr(e1) >= expr(e2);
-				case "<=": return expr(e1) <= expr(e2);
-				case ">": return expr(e1) > expr(e2);
-				case "<": return expr(e1) < expr(e2);
-				case "||": return expr(e1) == true || expr(e2) == true;
-				case "&&": return expr(e1) == true && expr(e2) == true;
+			var c0 = StringTools.fastCodeAt(op, 0);
+			switch( op.length ) {
+				case 1:
+					switch( c0 ) {
+						case "+".code: return FastBinop.add(expr(e1), expr(e2));
+						case "-".code: return expr(e1) - expr(e2);
+						case "*".code: return expr(e1) * expr(e2);
+						case "/".code: return expr(e1) / expr(e2);
+						case "%".code: return FastBinop.mod(expr(e1), expr(e2));
+						case "&".code: return expr(e1) & expr(e2);
+						case "|".code: return expr(e1) | expr(e2);
+						case "^".code: return expr(e1) ^ expr(e2);
+						case ">".code: return expr(e1) > expr(e2);
+						case "<".code: return expr(e1) < expr(e2);
+						default:
+					}
+				case 2:
+					var c1 = StringTools.fastCodeAt(op, 1);
+					switch( c0 ) {
+						case "<".code:
+						if( c1 == "<".code ) return expr(e1) << expr(e2);
+							if( c1 == "=".code ) return expr(e1) <= expr(e2);
+						case ">".code:
+							if( c1 == ">".code ) return expr(e1) >> expr(e2);
+							if( c1 == "=".code ) return expr(e1) >= expr(e2);
+						case "=".code:
+							if( c1 == "=".code ) return expr(e1) == expr(e2);
+						case "!".code:
+							if( c1 == "=".code ) return expr(e1) != expr(e2);
+						case "|".code:
+							if( c1 == "|".code ) return expr(e1) == true || expr(e2) == true;
+						case "&".code:
+							if( c1 == "&".code ) return expr(e1) == true && expr(e2) == true;
+						default:
+					}
+				case 3:
+					if( op == ">>>" ) return expr(e1) >>> expr(e2);
 				default:
-					var fop = binops.get(op);
-					if( fop == null ) error(EInvalidOp(op));
-					return fop(e1,e2);
 			}
+			var fop = binops.get(op);
+			if( fop == null ) error(EInvalidOp(op));
+			return fop(e1,e2);
 		case EUnop(op,prefix,e):
 			switch(op) {
 			case "!":
@@ -919,7 +914,7 @@ class Interp {
 				{
 					var f = Reflect.getProperty(c,field);
 					if( f != null )
-						variables.set(field, { r : f , isFinal: true });
+						finalVariables.set(field, f);
 				}
 			}
 			else if( en != null ) 
@@ -929,7 +924,7 @@ class Interp {
 				{
 					var f = Reflect.field(en, field);
 					if( f != null ) 
-						variables.set(field, { r : f , isFinal: true });
+						finalVariables.set(field, f);
 				}
 			}
 			else 
@@ -965,7 +960,7 @@ class Interp {
 				}
 
 				for( i => k in cl )
-					variables[i] = { r : k , isFinal : true };
+					finalVariables.set(i, k);
 				#end
 			}
 
@@ -976,17 +971,16 @@ class Interp {
 				c = asIdent;
 			checkSandboxAccess(f);
 			if( c != null && e != null )
-				variables.set(c, {r : e , isFinal : true });
+				finalVariables.set(c,e);
 				
 			return if( strictVar ) error(EUnexpected("import")) else null;
 		case EUsing( c ):
 			checkSandboxAccess(c);
 			var cl = Type.resolveClass(c);
-			if( cl == null ) {
-				var v = variables.get(c);
-				if( v != null && v.r != null )
-					cl = v.r;
-			}
+			if( cl == null )
+				cl = finalVariables.get(c);
+			if( cl == null )
+				cl = variables.get(c);
 			if( cl == null )
 				error(ETypeNotFound(c));
 
@@ -1007,7 +1001,10 @@ class Interp {
 			@:privateAccess script.setPackagePath(p);
 			return if( strictVar ) error(EUnexpected("package")) else null;
 		case EFunction(params,fexpr,name,_,line):
-			var capturedLocals = duplicate(locals);
+			var closureOuter : Array<Map<String,Dynamic>> = [locals];
+			if( localsOuter != null )
+				for( m in localsOuter )
+					closureOuter.push(m);
 			var me = this;
 			var hasOpt = false, minParams = 0;
 			for( p in params )
@@ -1016,13 +1013,13 @@ class Interp {
 				else if( p.value == null )
 					minParams++;
 			
-			if (compiled && name != null && !compiledExprFuncCache.exists(name)) {
+			if (compiled && name != null && !compiledExprFuncCache.exists(name) && depth == 0) {
 				compiledExprFuncCache.set(name, compileReturn(fexpr));
 			}
 			var f = function(args:Array<Dynamic>) 
 			{			
 				var compiledBody = null;
-				if( compiled ) {
+				if( compiled && depth == 0 ) {
 					compiledBody = compiledExprFuncCache.get(name);
 				}
 				function error(expr)
@@ -1076,16 +1073,14 @@ class Interp {
 					}
 				}
 			
-				var old = me.locals, depth = me.depth;
+				var old = me.locals, oldOuter = me.localsOuter, depth = me.depth;
 				me.depth++;
-				me.locals = me.duplicate(capturedLocals);
-				#if cpp
-				me.resetLocalRefs();
-				#end
+				me.locals = new Map();
+				me.localsOuter = closureOuter;
 				for( i in 0...params.length )
 				{
 					currentArg = params[i].name;
-					me.setLocal(params[i].name, new LocalRef(args[i]));
+					me.locals.set(params[i].name,args[i]);
 				}
 				var r = null;
 				var oldDecl = declared.length;
@@ -1094,9 +1089,7 @@ class Interp {
 						r = compiledBody != null ? compiledBody() : me.exprReturn(fexpr);
 					} catch( e : Dynamic ) {
 						me.locals = old;
-						#if cpp
-						me.resetLocalRefs();
-						#end
+						me.localsOuter = oldOuter;
 						me.depth = depth;
 						#if neko
 						neko.Lib.rethrow(e);
@@ -1109,9 +1102,7 @@ class Interp {
 				}
 				restore(oldDecl);
 				me.locals = old;
-				#if cpp
-				me.resetLocalRefs();
-				#end
+				me.localsOuter = oldOuter;
 				me.depth = depth;
 				inFunc = false;
 				if( returnedNothing )
@@ -1123,18 +1114,14 @@ class Interp {
 					returnedNothing = true;
 				return r;
 			};
-			var oldf = f;
 			var f = Reflect.makeVarArgs(f);
 			if( name != null ) {
 				if( depth == 0 ) {
 					// global function
-					variables.set(name, { r : f , isFinal: true });
+					finalVariables.set(name, f);
 				} else {
-					// function-in-function is a local function
 					declared.push( { n : name, old : locals.get(name) } );
-					var ref = new LocalRef(f);
-					setLocal(name, ref);
-					capturedLocals.set(name, ref); // allow self-recursion
+					locals.set(name, f);
 				}
 			}
 			return f;
@@ -1231,7 +1218,7 @@ class Interp {
 					if( !catchTypeMatches(err, c.t) )
 						continue;
 					declared.push({ n : c.v, old : locals.get(c.v) });
-					setLocal(c.v, new LocalRef(err));
+					locals.set(c.v, err);
 					var v : Dynamic = expr(c.e);
 					restore(old);
 					return v;
@@ -1281,7 +1268,7 @@ class Interp {
 
 					for( b in bindings ) {
 						declared.push({ n : b.n, old : locals.get(b.n) });
-						setLocal(b.n, new LocalRef(b.v));
+						locals.set(b.n, b.v);
 					}
 
 					if( c.ifExpr != null && expr(c.ifExpr) != true ) {
@@ -1375,31 +1362,12 @@ class Interp {
 			}
 
 		case EIdent(id):
-			#if cpp
-			var cachedLocal : LocalRef = null;
-			var cachedGeneration : Int = -1;
-			return function() {
-				strictVar = true;
-				var l = if( !cppLocalCacheEnabled ) locals.get(id) else {
-					if( cachedGeneration != localGeneration ) {
-						cachedLocal = locals.get(id);
-						cachedGeneration = localGeneration;
-					}
-					cachedLocal;
-				};
-				var v = l != null ? l.r : resolve(id);
-				strictVar = false;
-				return v;
-			};
-			#else
 			return function() {
 				strictVar = true;
 				var v = resolve(id);
 				strictVar = false;
 				return v;
 			};
-			#end
-
 		case EVar(n,f,_,ve):
 			var cInit = ve == null ? null : compileExpr(ve);
 			return function() {
@@ -1407,7 +1375,7 @@ class Interp {
 				var v : Dynamic = cInit == null ? null : cInit();
 				strictVar = false;
 				declared.push({ n : n, old : locals.get(n) });
-				setLocal(n, new LocalRef(v, f));
+				locals.set(n, v);
 				return if( strictVar ) error(EUnexpected(f ? "final" : "var")) else null;
 			};
 
@@ -1634,9 +1602,9 @@ class Interp {
 							key = Reflect.getProperty(next,"key");
 					}
 
-					setLocal(v, new LocalRef(key));
+					locals.set(v, key);
 					if( Reflect.hasField(next,"value") && v2 != null )
-						setLocal(v2, new LocalRef(Reflect.getProperty(next,"value")));
+						locals.set(v2, Reflect.getProperty(next,"value"));
 					try {
 						cBody();
 					} catch( err : Stop ) {
@@ -1798,32 +1766,18 @@ class Interp {
 		var og = e;
 		switch( Tools.expr(e) ) {
 		case EIdent(id):
-			#if cpp
-			var cachedLocal : LocalRef = null;
-			var cachedGeneration : Int = -1;
-			#end
 			return function() {
 				curExpr = og;
-				#if cpp
-				var l = if( !cppLocalCacheEnabled ) locals.get(id) else {
-					if( cachedGeneration != localGeneration ) {
-						cachedLocal = locals.get(id);
-						cachedGeneration = localGeneration;
-					}
-					cachedLocal;
-				};
-				#else
-				var l = locals.get(id);
-				#end
-				var v : Null<Dynamic> = (l == null) ? resolve(id) : l.r;
+				var l = localExists(id);
+				var v : Null<Dynamic> = (l) ? localGet(id) : resolve(id);
 				if( prefix ) {
 					v = FastBinop.addInt(v, delta);
-					if( l == null ) setVar(id,v) else l.r = v;
+					if( !l ) setVar(id,v); else localSet(id,v);
 				}
 				else {
 					var old = v;
 					v = FastBinop.addInt(v, delta);
-					if( l == null ) setVar(id,v) else l.r = v;
+					if( !l ) setVar(id,v); else localSet(id,v);
 					return old;
 				}
 				return v;
@@ -1837,39 +1791,21 @@ class Interp {
 		var c2 = compileExpr(e2);
 		switch( Tools.expr(e1) ) {
 		case EIdent(id):
-			#if cpp
-			var cachedLocal : LocalRef = null;
-			var cachedGeneration : Int = -1;
-			#end
 			return function() {
 				var v = c2();
-				#if cpp
-				var l = if( !cppLocalCacheEnabled ) locals.get(id) else {
-					if( cachedGeneration != localGeneration ) {
-						cachedLocal = locals.get(id);
-						cachedGeneration = localGeneration;
-					}
-					cachedLocal;
-				};
-				#else
-				var l = locals.get(id);
-				#end
-				if( l != null ) {
-					if( l.isFinal )
-						return error(EInvalidFinal(id));
-					l.r = v;
+				if( localExists(id) ) {
+					localSet(id,v);
 				}
 				else {
-					var v = variables.get(id);
-					if( v != null && v.isFinal )
+					if( finalVariables.exists(id) )
 						return error(EInvalidFinal(id));
 
 					var i = 0;
-					if( v == null )
+					if( !variables.exists(id) )
 						i++;
 					if( specialObject != null ) {
-						if( specialObject.obj != null ) {
-							if( !specialObjectsFields.contains( id ) )
+						if ( specialObject.obj != null ) {
+							if ( !specialObjectsFields.contains( id ) )
 								i++;
 						}
 						else
@@ -1920,28 +1856,14 @@ class Interp {
 		var c2 = compileExpr(e2);
 		switch( Tools.expr(e1) ) {
 		case EIdent(id):
-			#if cpp
-			var cachedLocal : LocalRef = null;
-			var cachedGeneration : Int = -1;
-			#end
 			return function() {
-				#if cpp
-				var l = if( !cppLocalCacheEnabled ) locals.get(id) else {
-					if( cachedGeneration != localGeneration ) {
-						cachedLocal = locals.get(id);
-						cachedGeneration = localGeneration;
-					}
-					cachedLocal;
-				};
-				#else
-				var l = locals.get(id);
-				#end
-				var current : Dynamic = l != null ? l.r : resolve(id);
+				var l = localExists(id);
+				var current : Dynamic = l ? localGet(id) : resolve(id);
 				var v = fop(current, c2());
-				if( l == null )
+				if( !l )
 					setVar(id,v);
 				else
-					l.r = v;
+					localSet(id,v);
 				return v;
 			};
 
@@ -2128,9 +2050,9 @@ class Interp {
 					key = Reflect.getProperty(next,"key");
 			}
 
-			setLocal(n, new LocalRef(key));
+			locals.set(n, key);
 			if( Reflect.hasField(next,"value") && n2 != null )
-				setLocal(n2, new LocalRef(Reflect.getProperty(next,"value")));
+				locals.set(n2, Reflect.getProperty(next,"value"));
 			try {
 				expr(e);
 			} catch( err : Stop ) {

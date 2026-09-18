@@ -234,16 +234,6 @@ class SScript
 	**/
 	public var interpCompilesFunctionCode(default, set):Bool = true;
 
-	#if cpp
-	/**
-		Whether in compiled functions, local variables are cached and the latest one is used
-		instead of re-evaluating local variables, making scripts run faster.
-
-		This feature is available in **C++ only**, and has no effect if `interpCompilesFunctionCode` is `false`.
-	**/
-	public var interpCachesCompiledLocals(default, set):Bool = true;
-	#end
-
 	/**
 		A custom origin you can assign to this script.
 
@@ -658,7 +648,10 @@ class SScript
 			traceError('$key is not a keyword therefore cannot be set', "set", [key, obj, setAsFinal]);
 			return this;
 		}
-		interp.variables[key] = { r : obj , isFinal : setAsFinal };
+		if (setAsFinal)
+			interp.finalVariables[key] = obj;
+		else
+			interp.variables[key] = obj;
 
 		return this;
 	}
@@ -934,7 +927,7 @@ class SScript
 		{
 			var v = interp.locals[i];
 			if (v != null)
-				newMap[i] = v.r;
+				newMap[i] = v;
 		}
 		return newMap;
 	}
@@ -957,6 +950,8 @@ class SScript
 
 		if (interp.locals.exists(key))
 			interp.locals.remove(key);
+		if (interp.finalVariables.exists(key))
+			interp.finalVariables.remove(key);
 		if (interp.variables.exists(key))
 			interp.variables.remove(key);
 
@@ -992,10 +987,11 @@ class SScript
 		}
 
 		if (interp.locals.exists(key))
-       		return interp.locals.get(key).r;
+       		return interp.locals.get(key);
+		else if (interp.finalVariables.exists(key))
+			return interp.finalVariables.get(key);
 
-		var r = interp.variables.get(key);
-		return r != null ? r.r : null;
+		return interp.variables.get(key);
 	}
 
 	/**
@@ -1130,6 +1126,9 @@ class SScript
 		for (i in [for (k in interp.locals.keys()) k])
 			interp.locals.remove(i);
 
+		for (i in [for (k in interp.finalVariables.keys()) k])
+			interp.finalVariables.remove(i);
+
 		for (i in [for (k in interp.variables.keys()) k])
 			interp.variables.remove(i);
 
@@ -1152,6 +1151,8 @@ class SScript
 
 		if (interp.locals.exists(key))
         	return true;
+		if (interp.finalVariables.exists(key))
+			return true;
 		if (interp.variables.exists(key))
 			return true;
 
@@ -1183,6 +1184,7 @@ class SScript
 			return;
 
 		interp.locals = new Map();
+		interp.localsOuter = null;
 		while (interp.declared.length > 0)
 			interp.declared.pop();
 
@@ -1206,6 +1208,8 @@ class SScript
 		interp.usingMethods = null;
 		interp.script = null;
 		interp.locals = null;
+		interp.localsOuter = null;
+		interp.finalVariables = null;
 		interp.variables = null;
 		interp.declared = null;
 	}
@@ -1550,14 +1554,4 @@ class SScript
 		interp.compiled = value;
 		return interpCompilesFunctionCode = value;
 	}
-
-	#if cpp
-	function set_interpCachesCompiledLocals(value:Bool):Bool {
-		if (_destroyed)
-			return false;
-		if (interp != null)
-			interp.cppLocalCacheEnabled = value;
-		return interpCachesCompiledLocals = value;
-	}
-	#end
 }

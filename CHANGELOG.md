@@ -1,3 +1,13 @@
+# 23.0.1
+## Changes
+- Made it so that only global functions are compiled when `interpCompilesFunctionCode` is true, local functions are now ignored
+
+## Fixes
+- Fixed faulty optimization of binary operators in C++ (with help from @MeguminBOT)
+
+## Removals
+- Removed `interpCachesCompiledLocals` entirely
+
 # 23.0.0
 ## Additions
 - Added HScript sandboxing
