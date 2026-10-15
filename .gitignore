@@ -1,7 +1,11 @@
 dump/
 build.hxml
+bench.hxml
 build_test.hxml
 bin/
 Main.hx
-SScript.zip
+*.zip
 test/
+tests/
+ssvm/tests
+ssvm/build

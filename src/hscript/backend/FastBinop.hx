@@ -1,5 +1,8 @@
 package hscript.backend;
 
+#if cpp
+@:cppFileCode("#include <cmath>")
+#end
 class FastBinop {
 	#if cpp
 	@:functionCode('
@@ -52,4 +55,35 @@ class FastBinop {
 	public static inline function mod(a:Dynamic, b:Dynamic):Dynamic return a % b;
 	public static inline function addInt(a:Dynamic, delta:Int):Dynamic return a + delta;
 	#end
+
+	#if cpp
+	@:functionCode('
+		if (v.mPtr && v.mPtr->__GetType() == vtFloat) {
+			double d = v.mPtr->__ToDouble();
+			if (d < -2147483648.0 || d > 2147483647.0 || d != d) {
+				if (d != d || d > 1.7e308 || d < -1.7e308)
+					return Dynamic((int)0);
+				double t = d < 0 ? ::std::ceil(d) : ::std::floor(d);
+				t = ::std::fmod(t, 4294967296.0);
+				if (t < 0)
+					t += 4294967296.0;
+				return Dynamic((int)(unsigned int)t);
+			}
+		}
+		return v;
+	')
+	public static function norm(v:Dynamic):Dynamic {
+		return v;
+	}
+	#else
+	public static inline function norm(v:Dynamic):Dynamic return v;
+	#end
+
+	public static inline function band(a:Dynamic, b:Dynamic):Dynamic return norm(a) & norm(b);
+	public static inline function bor(a:Dynamic, b:Dynamic):Dynamic return norm(a) | norm(b);
+	public static inline function bxor(a:Dynamic, b:Dynamic):Dynamic return norm(a) ^ norm(b);
+	public static inline function shl(a:Dynamic, b:Dynamic):Dynamic return norm(a) << norm(b);
+	public static inline function shr(a:Dynamic, b:Dynamic):Dynamic return norm(a) >> norm(b);
+	public static inline function ushr(a:Dynamic, b:Dynamic):Dynamic return norm(a) >>> norm(b);
+	public static inline function bnot(a:Dynamic):Dynamic return ~norm(a);
 }

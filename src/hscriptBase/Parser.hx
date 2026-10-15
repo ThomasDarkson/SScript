@@ -927,6 +927,15 @@ class Parser {
 
 			var fullName = path.join('.');
 			var cl = Tools.resolve(fullName);
+			if( cl == null && path.length >= 2 ) {
+				var d = path.length - 2;
+				while( d >= 0 && cl == null ) {
+					var p2 = path.copy();
+					p2.splice(d, 1);
+					cl = Tools.resolve(p2.join('.'));
+					d--;
+				}
+			}
 			if( cl == null ) {
 				var fields = [];
 				var fieldCl = null;
@@ -1414,6 +1423,7 @@ class Parser {
 						}
 						if( pow == null )
 							invalidChar(char);
+						if( exp == 0 ) exp = 10;
 						return TConst(CFloat((Math.pow(10, pow) / exp) * n * 10));
 					case ".".code:
 						if( exp > 0 ) {

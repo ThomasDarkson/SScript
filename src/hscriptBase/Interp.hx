@@ -175,12 +175,12 @@ class Interp {
 		binops.set("*",function(e1,e2) return me.expr(e1) * me.expr(e2));
 		binops.set("/",function(e1,e2) return me.expr(e1) / me.expr(e2));
 		binops.set("%",function(e1,e2) return FastBinop.mod(me.expr(e1), me.expr(e2)));
-		binops.set("&",function(e1,e2) return me.expr(e1) & me.expr(e2));
-		binops.set("|",function(e1,e2) return me.expr(e1) | me.expr(e2));
-		binops.set("^",function(e1,e2) return me.expr(e1) ^ me.expr(e2));
-		binops.set("<<",function(e1,e2) return me.expr(e1) << me.expr(e2));
-		binops.set(">>",function(e1,e2) return me.expr(e1) >> me.expr(e2));
-		binops.set(">>>",function(e1,e2) return me.expr(e1) >>> me.expr(e2));
+		binops.set("&",function(e1,e2) return FastBinop.band(me.expr(e1), me.expr(e2)));
+		binops.set("|",function(e1,e2) return FastBinop.bor(me.expr(e1), me.expr(e2)));
+		binops.set("^",function(e1,e2) return FastBinop.bxor(me.expr(e1), me.expr(e2)));
+		binops.set("<<",function(e1,e2) return FastBinop.shl(me.expr(e1), me.expr(e2)));
+		binops.set(">>",function(e1,e2) return FastBinop.shr(me.expr(e1), me.expr(e2)));
+		binops.set(">>>",function(e1,e2) return FastBinop.ushr(me.expr(e1), me.expr(e2)));
 		binops.set("==",function(e1,e2) return me.expr(e1) == me.expr(e2));
 		binops.set("!=",function(e1,e2) return me.expr(e1) != me.expr(e2));
 		binops.set(">=",function(e1,e2) return me.expr(e1) >= me.expr(e2));
@@ -197,12 +197,12 @@ class Interp {
 		assignOp("*=",function(v1:Float,v2:Float) return v1 * v2);
 		assignOp("/=",function(v1:Float,v2:Float) return v1 / v2);
 		assignOp("%=",function(v1:Float,v2:Float) return v1 % v2);
-		assignOp("&=",function(v1,v2) return v1 & v2);
-		assignOp("|=",function(v1,v2) return v1 | v2);
-		assignOp("^=",function(v1,v2) return v1 ^ v2);
-		assignOp("<<=",function(v1,v2) return v1 << v2);
-		assignOp(">>=",function(v1,v2) return v1 >> v2);
-		assignOp(">>>=",function(v1,v2) return v1 >>> v2);
+		assignOp("&=",function(v1,v2) return FastBinop.band(v1, v2));
+		assignOp("|=",function(v1,v2) return FastBinop.bor(v1, v2));
+		assignOp("^=",function(v1,v2) return FastBinop.bxor(v1, v2));
+		assignOp("<<=",function(v1,v2) return FastBinop.shl(v1, v2));
+		assignOp(">>=",function(v1,v2) return FastBinop.shr(v1, v2));
+		assignOp(">>>=",function(v1,v2) return FastBinop.ushr(v1, v2));
 	}
 
 	function checkIs(e1,e2) : Bool
@@ -790,9 +790,9 @@ class Interp {
 						case "*".code: return expr(e1) * expr(e2);
 						case "/".code: return expr(e1) / expr(e2);
 						case "%".code: return FastBinop.mod(expr(e1), expr(e2));
-						case "&".code: return expr(e1) & expr(e2);
-						case "|".code: return expr(e1) | expr(e2);
-						case "^".code: return expr(e1) ^ expr(e2);
+						case "&".code: return FastBinop.band(expr(e1), expr(e2));
+						case "|".code: return FastBinop.bor(expr(e1), expr(e2));
+						case "^".code: return FastBinop.bxor(expr(e1), expr(e2));
 						case ">".code: return expr(e1) > expr(e2);
 						case "<".code: return expr(e1) < expr(e2);
 						default:
@@ -801,10 +801,10 @@ class Interp {
 					var c1 = StringTools.fastCodeAt(op, 1);
 					switch( c0 ) {
 						case "<".code:
-						if( c1 == "<".code ) return expr(e1) << expr(e2);
+						if( c1 == "<".code ) return FastBinop.shl(expr(e1), expr(e2));
 							if( c1 == "=".code ) return expr(e1) <= expr(e2);
 						case ">".code:
-							if( c1 == ">".code ) return expr(e1) >> expr(e2);
+							if( c1 == ">".code ) return FastBinop.shr(expr(e1), expr(e2));
 							if( c1 == "=".code ) return expr(e1) >= expr(e2);
 						case "=".code:
 							if( c1 == "=".code ) return expr(e1) == expr(e2);
@@ -817,7 +817,7 @@ class Interp {
 						default:
 					}
 				case 3:
-					if( op == ">>>" ) return expr(e1) >>> expr(e2);
+					if( op == ">>>" ) return FastBinop.ushr(expr(e1), expr(e2));
 				default:
 			}
 			var fop = binops.get(op);
@@ -837,7 +837,7 @@ class Interp {
 				return increment(e,prefix,-1);
 			case "~":
 				var e:Null<Dynamic> = expr(e);
-				return ~e;
+				return FastBinop.bnot(e);
 			default:
 				error(EInvalidOp(op));
 			}
@@ -1428,12 +1428,12 @@ class Interp {
 			case "*": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return c1() * c2();
 			case "/": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return c1() / c2();
 			case "%": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return FastBinop.mod(c1(), c2());
-			case "&": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return c1() & c2();
-			case "|": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return c1() | c2();
-			case "^": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return c1() ^ c2();
-			case "<<": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return c1() << c2();
-			case ">>": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return c1() >> c2();
-			case ">>>": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return c1() >>> c2();
+			case "&": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return FastBinop.band(c1(), c2());
+			case "|": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return FastBinop.bor(c1(), c2());
+			case "^": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return FastBinop.bxor(c1(), c2());
+			case "<<": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return FastBinop.shl(c1(), c2());
+			case ">>": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return FastBinop.shr(c1(), c2());
+			case ">>>": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return FastBinop.ushr(c1(), c2());
 			case "==": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return c1() == c2();
 			case "!=": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return c1() != c2();
 			case ">=": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return c1() >= c2();
@@ -1448,12 +1448,12 @@ class Interp {
 			case "*=": return compileCompoundAssign(op, function(v1:Float,v2:Float) return v1 * v2, e1, e2);
 			case "/=": return compileCompoundAssign(op, function(v1:Float,v2:Float) return v1 / v2, e1, e2);
 			case "%=": return compileCompoundAssign(op, function(v1:Float,v2:Float) return v1 % v2, e1, e2);
-			case "&=": return compileCompoundAssign(op, function(v1,v2) return v1 & v2, e1, e2);
-			case "|=": return compileCompoundAssign(op, function(v1,v2) return v1 | v2, e1, e2);
-			case "^=": return compileCompoundAssign(op, function(v1,v2) return v1 ^ v2, e1, e2);
-			case "<<=": return compileCompoundAssign(op, function(v1,v2) return v1 << v2, e1, e2);
-			case ">>=": return compileCompoundAssign(op, function(v1,v2) return v1 >> v2, e1, e2);
-			case ">>>=": return compileCompoundAssign(op, function(v1,v2) return v1 >>> v2, e1, e2);
+			case "&=": return compileCompoundAssign(op, function(v1,v2) return FastBinop.band(v1, v2), e1, e2);
+			case "|=": return compileCompoundAssign(op, function(v1,v2) return FastBinop.bor(v1, v2), e1, e2);
+			case "^=": return compileCompoundAssign(op, function(v1,v2) return FastBinop.bxor(v1, v2), e1, e2);
+			case "<<=": return compileCompoundAssign(op, function(v1,v2) return FastBinop.shl(v1, v2), e1, e2);
+			case ">>=": return compileCompoundAssign(op, function(v1,v2) return FastBinop.shr(v1, v2), e1, e2);
+			case ">>>=": return compileCompoundAssign(op, function(v1,v2) return FastBinop.ushr(v1, v2), e1, e2);
 			default:
 				var fop = binops.get(op);
 				if( fop == null ) error(EInvalidOp(op));
@@ -1474,7 +1474,7 @@ class Interp {
 				return compileIncrement(ue,prefix,-1);
 			case "~":
 				var c = compileExpr(ue);
-				return function() { var v : Null<Dynamic> = c(); return ~v; };
+				return function() { var v : Null<Dynamic> = c(); return FastBinop.bnot(v); };
 			default:
 				return function() return error(EInvalidOp(op));
 			}

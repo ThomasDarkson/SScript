@@ -1,3 +1,16 @@
+# 24.0.0
+## Additions
+- (**C++ ONLY**) Added SSVM, a bytecode virtual machine written in C++, which runs scripts instead of the interpreter whenever possible
+    - Used automatically on hxcpp target
+    - Scripts the VM can't run safely fall back to the interpreter, so behavior stays the same
+    - Added `SScript.defaultVM` (defaults to `true`) to toggle the VM for every script, and `useVM` to toggle it per script (set before `execute()`/`doString()`)
+    - Added `runsOnVM`, which is `true` if the last execution of a script ran on the VM
+    - Set the `SSVM_DEBUG` define (or `SSVMBackend.debug`) to print why a script fell back to the interpreter
+- Added `specialObject` parameter to the constructor, so you can set the special object before the script executes
+
+## Fixes
+- Fixed `1e10` or higher returning `inf`
+
 # 23.0.1
 ## Changes
 - Made it so that only global functions are compiled when `interpCompilesFunctionCode` is true, local functions are now ignored

@@ -13,6 +13,9 @@ import sys.io.File;
 #end
 
 import hscript.backend.*;
+#if cpp
+import hscript.backend.SSVMBackend;
+#end
 import hscript.backend.Preset.PresetMode;
 import hscript.backend.HScriptSandbox;
 import hscript.backend.HScriptSandbox.HScriptLib;
@@ -114,7 +117,7 @@ typedef FunctionCall =
 @:keepSub
 class SScript
 {
-	public static final SSCRIPT_VERSION:String = "23.0.0";
+	public static final SSCRIPT_VERSION:String = "24.0.0";
 	
 	/**
 		If not null, enables the improved field system for every script.
@@ -174,6 +177,13 @@ class SScript
 		@see `interpCompilesFunctionCode`
 	**/
 	public static var defaultCompile:Null<Bool> = null;
+
+	/**
+		If true (default), scripts are run on the SSVM bytecode VM (C++ target only) whenever possible.
+
+		Scripts the VM can't handle (or non-C++ targets) automatically use the regular interpreter.
+	**/
+	public static var defaultVM:Bool = true;
 
 	/**
 		Every created SScript instance will be stored in this map.
@@ -386,6 +396,20 @@ class SScript
 	**/
 	public var traces:Bool = false;
 
+	/** 
+		Switch for the VM, see `defaultVM`. Set before `execute()`/`doString()`. 
+	**/
+	public var useVM:Bool = true;
+
+	/**
+		True if the last execution of this script ran on the VM.
+	**/
+	public var runsOnVM(get, never):Bool;
+
+	#if cpp
+	var vmBackend:SSVMBackend = null;
+	#end
+
 	/**
 		If true, prints one line every time this script is
 		(re-)executed, via `execute()`, `doString()`, or the constructor.
@@ -432,8 +456,9 @@ class SScript
 		@param startExecute Whether to execute the script immediately. (Recommended)
 		@param variablesToSet If not null or empty, sets the variables passed to this script before applying `preset`, regardless of the value of argument `preset`.
 		@param hscriptSandbox If not null, sandboxes this script according to `hscriptSandboxed`'s documentation. Equivalent to setting `hscriptSandboxed = true` plus whichever fields of `HScriptSandboxSettings` you pass. Has no effect if `startExecute` is false; set the properties directly before calling `execute()` in that case.
+		@param specialObject If not null, sets the passed special object to this script. See `setSpecialObject`
 	**/
-	public function new(?scriptPath:String = "", ?preset:Bool = true, ?startExecute:Bool = true, ?variablesToSet:Array<{name:String, ?variable:Dynamic, ?isFinal:Bool}>, ?hscriptSandbox:HScriptSandboxSettings)
+	public function new(?scriptPath:String = "", ?preset:Bool = true, ?startExecute:Bool = true, ?variablesToSet:Array<{name:String, ?variable:Dynamic, ?isFinal:Bool}>, ?hscriptSandbox:HScriptSandboxSettings, ?specialObject:{obj:Dynamic, ?includeFunctions:Bool, ?exclusions:Array<String>})
 	{
 		if (hscriptSandbox != null) {
 			hscriptSandboxed = true;
@@ -503,6 +528,15 @@ class SScript
 			}
 		}
 
+		if (specialObject != null) {
+			if (specialObject.includeFunctions == null)
+				specialObject.includeFunctions = true;
+			if (specialObject.exclusions == null)
+				specialObject.exclusions = [];
+
+			setSpecialObject(specialObject.obj, specialObject.includeFunctions, specialObject.exclusions);
+		}
+
 		try 
 		{
 			doFile(scriptPath);
@@ -554,16 +588,23 @@ class SScript
 			{
 				try 
 				{
-					var expr:Expr = null;
-					if (scriptCache.exists(script))
-						expr = scriptCache.get(script);
-					else 
+					var vm = tryVM(script, origin);
+					#if SSCRIPT_SSVM_ECHO
+					trace(toString() + " ran in VM?: " + this.runsOnVM);
+					#end
+					if (!vm)
 					{
-						expr = parser.parseString(script, origin);
-						scriptCache.set(script, expr);
+						var expr:Expr = null;
+						if (scriptCache.exists(script))
+							expr = scriptCache.get(script);
+						else 
+						{
+							expr = parser.parseString(script, origin);
+							scriptCache.set(script, expr);
+						}
+						var r = interp.execute(expr);
+						returnValue = r;
 					}
-					var r = interp.execute(expr);
-					returnValue = r;
 				}
 				catch (e) 
 				{
@@ -652,6 +693,11 @@ class SScript
 			interp.finalVariables[key] = obj;
 		else
 			interp.variables[key] = obj;
+
+		#if cpp
+		if (vmBackend != null)
+			vmBackend.setGlobal(key, obj);
+		#end
 
 		return this;
 	}
@@ -890,6 +936,10 @@ class SScript
 		interp.specialObject.exclusions = exclusions.copy();
 		interp.specialObject.includeFunctions = includeFunctions;
 		interp.generateSpecialObjectFields();
+		#if cpp
+		if (vmBackend != null)
+			vmBackend.rebindSelf(obj);
+		#end
 		return this;
 	}
 
@@ -906,6 +956,10 @@ class SScript
 		
 		interp.specialObject = null;
 		interp.generateSpecialObjectFields();
+		#if cpp
+		if (vmBackend != null)
+			vmBackend.rebindSelf(null);
+		#end
 		return this;
 	}
 	
@@ -948,6 +1002,11 @@ class SScript
 		if (!active)
 			return this;
 
+		#if cpp
+		if (vmBackend != null)
+			vmBackend.removeGlobal(key);
+		#end
+
 		if (interp.locals.exists(key))
 			interp.locals.remove(key);
 		if (interp.finalVariables.exists(key))
@@ -985,6 +1044,11 @@ class SScript
 
 			return null;
 		}
+
+		#if cpp
+		if (vmBackend != null && vmBackend.owns(key))
+			return vmBackend.getGlobal(key);
+		#end
 
 		if (interp.locals.exists(key))
        		return interp.locals.get(key);
@@ -1123,6 +1187,8 @@ class SScript
 		if (!active)
 			return this;
 
+		destroyVM();
+
 		for (i in [for (k in interp.locals.keys()) k])
 			interp.locals.remove(i);
 
@@ -1148,6 +1214,11 @@ class SScript
 			return false;
 		if (key == null || key.trim().length == 0)
 			return false;
+
+		#if cpp
+		if (vmBackend != null && vmBackend.owns(key))
+			return true;
+		#end
 
 		if (interp.locals.exists(key))
         	return true;
@@ -1212,6 +1283,17 @@ class SScript
 		interp.finalVariables = null;
 		interp.variables = null;
 		interp.declared = null;
+	}
+
+	function destroyVM():Void
+	{
+		#if cpp
+		if (vmBackend != null)
+		{
+			vmBackend.destroy();
+			vmBackend = null;
+		}
+		#end
 	}
 
 	function useIDForGlobal() 
@@ -1318,9 +1400,16 @@ class SScript
 			{
 				try 
 				{
-					var expr:Expr = parser.parseString(script, og);
-					var r = interp.execute(expr);
-					returnValue = r;
+					var vm = tryVM(script, og);
+					#if SSCRIPT_SSVM_ECHO
+					trace(toString() + " ran in VM?: " + this.runsOnVM);
+					#end
+					if (!vm)
+					{
+						var expr:Expr = parser.parseString(script, og);
+						var r = interp.execute(expr);
+						returnValue = r;
+					}
 				}
 				catch (e) 
 				{
@@ -1344,6 +1433,43 @@ class SScript
 		catch (e) lastReportedTime = -1;
 
 		return this;
+	}
+
+	function tryVM(code:String, origin:String):Bool
+	{
+		#if cpp
+		destroyVM();
+		if (!useVM || !defaultVM || hscriptSandboxed)
+			return false;
+
+		var so:Dynamic = interp.specialObject != null ? interp.specialObject.obj : null;
+		var soFields:Array<String> = so != null ? interp.specialObjectsFields : null;
+
+		var b = SSVMBackend.create(code, origin, function(n:String):Dynamic
+		{
+			if (interp.finalVariables.exists(n))
+				return interp.finalVariables.get(n);
+			return interp.variables.get(n);
+		}, so, soFields);
+		if (b == null)
+			return false;
+
+		vmBackend = b;
+		var err = b.run();
+		if (err != null)
+		{
+			parsingException = new Exception(err);
+			returnValue = null;
+		}
+		else
+		{
+			returnValue = b.result();
+			b.syncInto(interp.variables);
+		}
+		return true;
+		#else
+		return false;
+		#end
 	}
 
 	/**
@@ -1442,6 +1568,7 @@ class SScript
 			global.remove(Std.string(ID));
 
 		removeSpecialObject();
+		destroyVM();
 		clear();
 		resetInterp();
 		destroyInterp();
@@ -1553,5 +1680,14 @@ class SScript
 			return value;
 		interp.compiled = value;
 		return interpCompilesFunctionCode = value;
+	}
+
+	function get_runsOnVM():Bool
+	{
+		#if cpp
+		return vmBackend != null;
+		#else
+		return false;
+		#end
 	}
 }

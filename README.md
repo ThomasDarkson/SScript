@@ -1,5 +1,6 @@
 [![](https://thomasdarkson.com/assets/stickers/sticker.png)](https://thomasdarkson.com)
-[<img src="https://thomasdarkson.com/sscript/logo.png" style="width:40%; height:auto;">](https://thomasdarkson.com)
+
+[<img src="https://thomasdarkson.com/sscript/logo_with_version.png" style="width:35%; height:auto;">](https://thomasdarkson.com)
 
 # SScript
 
@@ -22,10 +23,23 @@ Add this to `Project.xml` to add SScript to your OpenFL project:
 ```xml
 <haxelib name="SScript"/>
 ```
+
 ### Haxe Projects
 Add this to `build.hxml` to add SScript to your Haxe build.
 ```hxml
 -lib SScript
+```
+
+On Linux, you might need `NO_PRECOMPILED_HEADERS` if it fails to compile.
+Add this to `Project.xml` (OpenFL):
+
+```xml
+<haxedef name="NO_PRECOMPILED_HEADERS" if="linux" />
+```
+
+Haxe:
+```hxml
+-D NO_PRECOMPILED_HEADERS
 ```
 
 > [!NOTE]
@@ -372,6 +386,153 @@ class Main {
 	}
 }
 ```
+
+## SuperlativeScript Virtual Machine (C++ only)
+
+*Not to be confused with Compiled Functions, that uses the regular interpreter*
+
+On C++ targets, SScript can run scripts on SSVM, a bytecode virtual machine written in C++, instead of the interpreter. It is used automatically.
+ 
+Scripts the VM can't run safely silently use the regular interpreter, so the result is the same either way. A script falls back to the interpreter if it:
+- uses regular expressions (`~/.../` or `EReg`)
+- uses `new` on a dotted class path (e.g. `new sys.io.File`), wildcard imports (`import haxe.*;`), or `using` (anything other than `StringTools`)
+- uses enum pattern matching in `switch` (e.g. `case Type(x)`)
+- uses a name that can't be resolved when the script is compiled
+- fails to compile
+- is sandboxed
+
+All targets except C++ always use the interpreter.
+
+### Related fields
+ 
+| Field | Description |
+| --- | --- |
+| `SScript.defaultVM` | If `false`, no script uses the VM. Defaults to `true` |
+| `useVM` | Script switch, set it before `execute()`/`doString()`. Defaults to `true` |
+| `runsOnVM` | `true` if the last execution of the script ran on the VM |
+
+### How it works
+
+```mermaid
+flowchart TD
+    Z["Haxe Application"] --> A["C++ Target?"]
+    
+    A -- No --> INT["HScript Interpreter"]
+    A -- Yes --> B["HScript Code"] --> C{"SSVM Enabled?"}    
+
+    C -- No --> INT
+    C -- Yes --> D{"Sandboxed script?"}
+
+    D -- Yes --> INT
+    D -- No --> F{"Unsupported Features:"}
+
+    F -- "Regular expressions<br/>(~/.../ or EReg)" --> Y["Script contains any of the above?"]
+    F -- "Dotted class construction<br/>(new haxe.Serializer())" --> Y
+    F -- "Wildcard imports<br/>(import haxe.*)" --> Y
+    F -- "Unsupported using<br/>(using MyClass)" --> Y
+    F -- "Enum pattern matching<br/>(case Type(x))" --> Y
+    F -- "Unresolved names" --> Y
+
+    Y -- Yes --> INT
+    Y -- No --> G["Parse Code"]
+
+    G --> H["Build AST"]
+    H --> I["Compile to Bytecode"]
+
+    I --> J{"Compilation Successful?"}
+    J -- No --> INT
+    J -- Yes --> K["SSVM Virtual Machine"]
+
+    K --> L["Execute Bytecode"]
+    L --> M{"Runtime Error?"}
+
+    M -- Yes --> N["Report Runtime Error"]
+    M -- No --> O["Retrieve Result"]
+    O --> P["Synchronize Variables"]
+    P --> Q["Execution Complete"]
+
+    INT --> R["Execute with HScript Interpreter"]
+    R --> Q
+
+    style Z fill:#ffedd5,stroke:#f97316,color:#9a3412
+    style INT fill:#fff3cd,stroke:#d39e00,color:#664d03
+    style K fill:#d4edda,stroke:#28a745,color:#155724
+    style N fill:#f8d7da,stroke:#dc3545,color:#721c24
+    style Q fill:#d1ecf1,stroke:#17a2b8,color:#0c5460
+```
+
+### Differences (VM vs Interpreter)
+
+- Strings are byte based (`"é".length` is `2` on the VM)
+- Map iteration order is insertion order
+- Int arithmetic overflow becomes Float
+- Values copied to Haxe lose identity
+ 
+```haxe
+import hscript.SScript;
+ 
+class Main {
+	static function main() {
+		var script = new SScript();
+		script.doString("
+			function fib(n) { 
+                if (n < 2) 
+                    return n; 
+                return fib(n - 1) + fib(n - 2); 
+            }
+		");
+		trace(script.runsOnVM); // true on C++, false on other targets or if the script fell back
+		trace(script.call("fib", [25]).returnValue); // 75025
+ 
+		var script = new SScript();
+		script.useVM = false; // always use the interpreter for this script
+		script.doString("trace('interpreted');");
+	}
+}
+```
+
+The VM is almost always faster than the regular interpreter, so it is recommended to leave it on.
+
+```haxe
+import hscript.SScript;
+
+class Main {
+    static function main() {
+		var code = "
+			import haxe.Timer;
+
+            function calls(n) { 
+				var t = 0; 
+				for (i in 0...n) {
+					var r = i * (Math.random() * (Math.random() * 10));
+					t += inc(r);
+				}
+				return t; 
+			}
+
+			function inc(x) 
+				return x + 1;
+
+			var stamp = Timer.stamp();
+			var n = calls(5000000);
+			trace('I finished in ${Timer.stamp() - stamp} seconds, the number I got was $n');
+        ";
+
+		// Below are real numbers (with 9800X3D CPU)
+		SScript.defaultVM = true; // Turn on VM, it's on by default anyway
+        var script = new SScript();
+        script.doString(code); // [SScript #1]:18: I finished in 0.3471832 seconds, the number I got was 31241731977943.5
+		script.destroy();
+ 
+		SScript.defaultVM = false; // Turn off VM
+        var script = new SScript();
+        script.doString(code); // [SScript #2]:18: I finished in 13.7525623 seconds, the number I got was 31258548714651.2
+		script.destroy();
+    }
+}
+```
+
+Unlike in the example above, the VM won't make every script 40x faster. There's a good chance it won't. However, you can still expect some serious improvement. In my testing, the speedup ranged from 1.6x to 200x, depending on the script.
 
 ## Compiled Functions
 Script functions can be compiled into cached closures instead of being re-interpreted on every call, via `interpCompilesFunctionCode` (set `SScript.defaultCompile` to change the default for every instance created afterwards).
