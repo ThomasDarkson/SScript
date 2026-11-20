@@ -15,8 +15,7 @@ using StringTools;
 
 	@see `hscript.backend.HScriptSandbox`
 **/
-class HScriptLib
-{
+class HScriptLib {
 	/**
 		`Sys` and anything else directly under the `sys` package that isn't covered
 		by a more specific category below (`sys.db.*`, `sys.*` etc.).
@@ -79,7 +78,7 @@ class HScriptLib
 		"Safe by default" set for untrusted scripts: every category is blocked. A
 		script sandboxed with this can still call
 		methods and use anything explicitly set into it. 
-		
+
 		It just can't name its way to the filesystem, a process, the network, a
 		native-target API, or the interpreter itself.
 	**/
@@ -143,11 +142,9 @@ typedef HScriptSandboxSettings = {
 	public var ?timeLimitMs:Int;
 }
 
-class HScriptSandbox
-{
+class HScriptSandbox {
 	public static function apply(interp:Interp, blockedLibs:Int, ?extraBlockedClasses:Array<String>, ?extraAllowedClasses:Array<String>,
-			instructionLimit:Int = 0, timeLimitMs:Int = 0):Void
-	{
+			instructionLimit:Int = 0, timeLimitMs:Int = 0):Void {
 		if (interp == null)
 			return;
 
@@ -163,8 +160,7 @@ class HScriptSandbox
 		}
 	}
 
-	public static function remove(interp:Interp):Void
-	{
+	public static function remove(interp:Interp):Void {
 		if (interp == null)
 			return;
 
@@ -179,8 +175,7 @@ class HScriptSandbox
 		}
 	}
 
-	public static function isAllowed(path:String, blockedLibs:Int, ?extraBlockedClasses:Array<String>, ?extraAllowedClasses:Array<String>):Bool
-	{
+	public static function isAllowed(path:String, blockedLibs:Int, ?extraBlockedClasses:Array<String>, ?extraAllowedClasses:Array<String>):Bool {
 		if (path == null || path.length == 0)
 			return true;
 
@@ -201,16 +196,14 @@ class HScriptSandbox
 		return true;
 	}
 
-	static inline function matches(path:String, prefix:String):Bool
-	{
+	static inline function matches(path:String, prefix:String):Bool {
 		return path == prefix || path.startsWith(prefix + ".");
 	}
 
-	static function categoryOf(path:String):Int
-	{
+	static function categoryOf(path:String):Int {
 		if (path == "Reflect")
 			return HScriptLib.REFLECTION;
-		
+
 		if (path == "Type")
 			return HScriptLib.TYPE;
 

@@ -510,7 +510,14 @@ bool VM::Impl::isOfType(Value v, const std::string& t) {
         case K::String: return t == "String";
         case K::Array: return t == "Array";
         case K::Map: return t == "Map" || t == "StringMap" || t == "IntMap" || t == "ObjectMap" || t == "haxe.ds.StringMap" || t == "haxe.ds.IntMap";
-        case K::Object: return t == "Object" || t == "Dynamic";
+        case K::Object: {
+            ObjObj* o=(ObjObj*)v.o;
+            Value host=objGet(o,intern("__ss_host"));
+            if(host.t==Type::Obj && host.o->kind==K::Host && isOfType(host,t))return true;
+            Value cls=objGet(o,intern("__ss_class")),en=objGet(o,intern("__ss_enum")),types=objGet(o,intern("__ss_types"));
+            if(types.t==Type::Obj && types.o->kind==K::Array)for(auto& type:((ArrObj*)types.o)->v)if(isStr(type)&&S(type)->s==t)return true;
+            return t=="Object" || t=="Dynamic" || (isStr(cls) && S(cls)->s==t) || (isStr(en) && S(en)->s==t);
+        }
         case K::Closure: case K::Native: case K::Bound: return t == "Function";
         case K::StrBuf: return t == "StringBuf";
         case K::Regex: return t == "EReg";
@@ -524,13 +531,18 @@ bool VM::Impl::isOfType(Value v, const std::string& t) {
 }
 
 Value VM::Impl::construct(const std::string& cls, Value* args, int argc) {
-    auto it = classes.find(cls);
-    if (it == classes.end()) {
-        auto g = globalIndex.find(cls);
-        if (g != globalIndex.end() && globals[(size_t)g->second].t == Type::Obj && globals[(size_t)g->second].o->kind == K::Host)
-            return hostNew(globals[(size_t)g->second], args, argc);
-        fail("Type not found: " + cls);
+    auto scriptClass=globalIndex.find(cls);
+    if(scriptClass!=globalIndex.end()) {
+        Value c=globals[(size_t)scriptClass->second];
+        if(c.t==Type::Obj && c.o->kind==K::Object) {
+            if(truthy(objGet((ObjObj*)c.o,intern("__ss_interface"))))fail("Cannot instantiate interface: "+cls);
+            Value create=objGet((ObjObj*)c.o,intern("__ss_create"));
+            if(create.t==Type::Obj) return callClosureOrNative(create,args,argc);
+        }
+        if(c.t==Type::Obj && c.o->kind==K::Host) return hostNew(c,args,argc);
     }
+    auto it = classes.find(cls);
+    if (it == classes.end()) fail("Type not found: " + cls);
     return it->second(*vm, args, argc);
 }
 
@@ -647,6 +659,7 @@ void VM::Impl::installBuiltins() {
             std::string tn;
             if (a[1].t == Type::Obj && a[1].o->kind == K::Object) {
                 Value nm = I.objGet((ObjObj*)a[1].o, I.syms[S___name]);
+                if(!isStr(nm)) nm=I.objGet((ObjObj*)a[1].o,I.intern("__ss_name"));
                 if (isStr(nm)) tn = S(nm)->s;
             }
             return Value::Bool(I.isOfType(a[0], tn));
@@ -776,6 +789,8 @@ void VM::Impl::installBuiltins() {
         return Value::Object(r);
     };
     classes["Object"] = [&I](VM&, Value*, int) { return Value::Object(I.newObj()); };
+    classes["__ss_regex"] = classes["EReg"];
+    builtinNames.insert("__ss_regex");
 
     for (size_t i = 0; i < globalNames.size(); i++)
         if (globals[i].t != Type::Undef) builtinNames.insert(globalNames[i]);

@@ -51,9 +51,14 @@ class FastBinop {
 		return a + delta;
 	}
 	#else
-	public static inline function add(a:Dynamic, b:Dynamic):Dynamic return a + b;
-	public static inline function mod(a:Dynamic, b:Dynamic):Dynamic return a % b;
-	public static inline function addInt(a:Dynamic, delta:Int):Dynamic return a + delta;
+	public static inline function add(a:Dynamic, b:Dynamic):Dynamic
+		return a + b;
+
+	public static inline function mod(a:Dynamic, b:Dynamic):Dynamic
+		return a % b;
+
+	public static inline function addInt(a:Dynamic, delta:Int):Dynamic
+		return a + delta;
 	#end
 
 	#if cpp
@@ -76,14 +81,28 @@ class FastBinop {
 		return v;
 	}
 	#else
-	public static inline function norm(v:Dynamic):Dynamic return v;
+	public static inline function norm(v:Dynamic):Dynamic
+		return v;
 	#end
 
-	public static inline function band(a:Dynamic, b:Dynamic):Dynamic return norm(a) & norm(b);
-	public static inline function bor(a:Dynamic, b:Dynamic):Dynamic return norm(a) | norm(b);
-	public static inline function bxor(a:Dynamic, b:Dynamic):Dynamic return norm(a) ^ norm(b);
-	public static inline function shl(a:Dynamic, b:Dynamic):Dynamic return norm(a) << norm(b);
-	public static inline function shr(a:Dynamic, b:Dynamic):Dynamic return norm(a) >> norm(b);
-	public static inline function ushr(a:Dynamic, b:Dynamic):Dynamic return norm(a) >>> norm(b);
-	public static inline function bnot(a:Dynamic):Dynamic return ~norm(a);
+	public static inline function band(a:Dynamic, b:Dynamic):Dynamic
+		return norm(a) & norm(b);
+
+	public static inline function bor(a:Dynamic, b:Dynamic):Dynamic
+		return norm(a) | norm(b);
+
+	public static inline function bxor(a:Dynamic, b:Dynamic):Dynamic
+		return norm(a) ^ norm(b);
+
+	public static inline function shl(a:Dynamic, b:Dynamic):Dynamic
+		return norm(a) << norm(b);
+
+	public static inline function shr(a:Dynamic, b:Dynamic):Dynamic
+		return norm(a) >> norm(b);
+
+	public static inline function ushr(a:Dynamic, b:Dynamic):Dynamic
+		return norm(a) >>> norm(b);
+
+	public static inline function bnot(a:Dynamic):Dynamic
+		return ~norm(a);
 }

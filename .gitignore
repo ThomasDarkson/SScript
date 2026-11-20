@@ -6,6 +6,10 @@ bin/
 Main.hx
 *.zip
 test/
-tests/
+/docs/
+/tests/
+/export_classes.info
 ssvm/tests
 ssvm/build
+repacked/
+*.py

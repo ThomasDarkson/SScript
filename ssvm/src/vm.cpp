@@ -336,17 +336,64 @@ Value VM::Impl::objGet(ObjObj* o, StrObj* k) {
     return Value();
 }
 void VM::Impl::objSet(ObjObj* o, StrObj* k, Value v) {
+    if (k->s == "__ss_access" || k->s == "__ss_parent" || k->s == "__ss_receiver") o->scriptedAccess = true;
     for (auto& f : o->f) if (f.k == k) { f.v = v; return; }
     o->f.push_back({k, v});
     noteGrowth(sizeof(Field));
 }
 
+Value VM::Impl::scriptRawGet(ObjObj* o,StrObj* name) {
+    for(auto& f:o->f)if(f.k==name)return f.v;
+    Value binding=objGet(o,intern("__ss_binding")),arg=Value::Object(name);
+    if(binding.t==Type::Obj && binding.o->kind==K::Host && truthy(hostMethod(binding,"hasField",&arg,1)))return hostMethod(binding,"readBase",&arg,1);
+    return Value();
+}
+void VM::Impl::scriptRawSet(ObjObj* o,StrObj* name,Value v) {
+    for(auto& f:o->f)if(f.k==name){objSet(o,name,v);return;}
+    Value binding=objGet(o,intern("__ss_binding")),arg=Value::Object(name);
+    if(binding.t==Type::Obj && binding.o->kind==K::Host && truthy(hostMethod(binding,"hasField",&arg,1))) {
+        Value args[]={arg,v};hostMethod(binding,"writeBase",args,2);return;
+    }
+    objSet(o,name,v);
+}
+
 Value VM::Impl::getField(Value obj, StrObj* name, int sym) {
+    if(name->s.compare(0,10,"__ss_read_")==0)name=intern("__ss_raw_"+name->s.substr(10));
+    else if(name->s.compare(0,11,"__ss_write_")==0)name=intern(name->s.substr(11));
     if (obj.t == Type::Obj) {
         switch (obj.o->kind) {
             case K::Object: {
                 ObjObj* o = (ObjObj*)obj.o;
+                if (o->scriptedAccess) {
+                    Value receiver=objGet(o,intern("__ss_receiver")),fields=objGet(o,intern("__ss_superfields"));
+                    if(receiver.t==Type::Obj && receiver.o->kind==K::Object && fields.t==Type::Obj && fields.o->kind==K::Object) {
+                        Value prop=objGet((ObjObj*)fields.o,name);
+                        if(prop.t==Type::Obj && prop.o->kind==K::Object) {
+                            Value mode=objGet((ObjObj*)prop.o,intern("get"));
+                            if(!isStrV(mode))fail("Invalid super property metadata");
+                            if(asStr(mode)->s=="get")return callClosureOrNative(objGet(o,intern("get_"+name->s)),nullptr,0);
+                            if(asStr(mode)->s=="never")fail("Cannot read property '"+name->s+"'");
+                            return scriptRawGet((ObjObj*)receiver.o,name);
+                        }
+                    }
+                    if (name->s.compare(0,9,"__ss_raw_")==0) return scriptRawGet(o,intern(name->s.substr(9)));
+                    Value access=objGet(o,intern("__ss_access"));
+                    if(access.t==Type::Obj && access.o->kind==K::Object) {
+                        Value prop=objGet((ObjObj*)access.o,name);
+                        if(prop.t==Type::Obj && prop.o->kind==K::Object) {
+                            Value mode=objGet((ObjObj*)prop.o,intern("get"));
+                            if(mode.t==Type::Obj && mode.o->kind==K::String) {
+                                std::string m=asStr(mode)->s;
+                                if(m=="get") return callClosureOrNative(objGet(o,intern("get_"+name->s)),nullptr,0);
+                                if(m=="null" || m=="never") fail("Cannot read property '"+name->s+"'");
+                            }
+                        }
+                    }
+                }
                 for (auto& f : o->f) if (f.k == name) return f.v;
+                Value parent=objGet(o,intern("__ss_parent"));
+                if(parent.t==Type::Obj && (parent.o->kind==K::Object||parent.o->kind==K::Host))return getField(parent,name,sym);
+                Value host=objGet(o,intern("__ss_host"));if(host.t==Type::Obj && host.o->kind==K::Host)return hostGet(host,name);
                 return Value();
             }
             case K::Array:
@@ -378,7 +425,41 @@ Value VM::Impl::getField(Value obj, StrObj* name, int sym) {
 }
 
 void VM::Impl::setField(Value obj, StrObj* name, Value v) {
-    if (obj.t == Type::Obj && obj.o->kind == K::Object) { objSet((ObjObj*)obj.o, name, v); return; }
+    if(name->s.compare(0,11,"__ss_write_")==0)name=intern("__ss_raw_"+name->s.substr(11));
+    else if(name->s.compare(0,10,"__ss_read_")==0)name=intern(name->s.substr(10));
+    if (obj.t == Type::Obj && obj.o->kind == K::Object) {
+        ObjObj* o=(ObjObj*)obj.o;
+        if(o->scriptedAccess) {
+            Value receiver=objGet(o,intern("__ss_receiver")),fields=objGet(o,intern("__ss_superfields"));
+            if(receiver.t==Type::Obj && receiver.o->kind==K::Object && fields.t==Type::Obj && fields.o->kind==K::Object) {
+                Value prop=objGet((ObjObj*)fields.o,name);
+                if(prop.t==Type::Obj && prop.o->kind==K::Object) {
+                    Value mode=objGet((ObjObj*)prop.o,intern("set"));
+                    if(!isStrV(mode))fail("Invalid super property metadata");
+                    if(asStr(mode)->s=="set"){callClosureOrNative(objGet(o,intern("set_"+name->s)),&v,1);return;}
+                    if(asStr(mode)->s=="never")fail("Cannot write property '"+name->s+"'");
+                    scriptRawSet((ObjObj*)receiver.o,name,v);return;
+                }
+            }
+            if(name->s.compare(0,9,"__ss_raw_")==0) {scriptRawSet(o,intern(name->s.substr(9)),v);return;}
+            Value access=objGet(o,intern("__ss_access"));
+            if(access.t==Type::Obj && access.o->kind==K::Object) {
+                Value prop=objGet((ObjObj*)access.o,name);
+                if(prop.t==Type::Obj && prop.o->kind==K::Object) {
+                    Value mode=objGet((ObjObj*)prop.o,intern("set"));
+                    if(mode.t==Type::Obj && mode.o->kind==K::String) {
+                        std::string m=asStr(mode)->s;
+                        if(m=="set") {callClosureOrNative(objGet(o,intern("set_"+name->s)),&v,1);return;}
+                        if(m=="null" || m=="never") fail("Cannot write property '"+name->s+"'");
+                    }
+                }
+            }
+        }
+        Value parent=objGet(o,intern("__ss_parent"));
+        bool own=false;for(auto& f:o->f)if(f.k==name){own=true;break;}
+        if(!own && name->s.compare(0,5,"__ss_")!=0 && parent.t==Type::Obj && (parent.o->kind==K::Object||parent.o->kind==K::Host)){setField(parent,name,v);return;}
+        scriptRawSet(o,name,v);return;
+    }
     if (obj.t == Type::Obj && obj.o->kind == K::Host) { hostSet(obj, name, v); return; }
     if (obj.t == Type::Null) fail("Null Object Reference (setting field '" + name->s + "')");
     fail("Cannot set field '" + name->s + "' on this value");
@@ -406,7 +487,7 @@ Value VM::Impl::getIndex(Value obj, Value idx) {
                 return out;
             }
             case K::Object:
-                if (isStrV(idx)) return objGet((ObjObj*)obj.o, intern(asStr(idx)->s));
+                if (isStrV(idx)) return getField(obj, intern(asStr(idx)->s), intern(asStr(idx)->s)->sym);
                 break;
             case K::String: {
                 int64_t i;
@@ -442,7 +523,7 @@ void VM::Impl::setIndex(Value obj, Value idx, Value v) {
             }
             case K::Map: mapSet((MapObj*)obj.o, idx, v); return;
             case K::Object:
-                if (isStrV(idx)) { objSet((ObjObj*)obj.o, intern(asStr(idx)->s), v); return; }
+                if (isStrV(idx)) { setField(obj, intern(asStr(idx)->s), v); return; }
                 break;
             case K::Host: hostSetIdx(obj, idx, v); return;
             default: break;
@@ -940,7 +1021,7 @@ Value VM::Impl::runLoop(int entryNf) {
         Value& o = sp[-1];
         if (o.t == Type::Obj) {
             K kd = o.o->kind;
-            if (kd == K::Object) {
+            if (kd == K::Object && !((ObjObj*)o.o)->scriptedAccess) {
                 ObjObj* ob = (ObjObj*)o.o;
                 Value r;
                 size_t n = ob->f.size(), h = ins->x;
@@ -1014,6 +1095,9 @@ Value VM::Impl::runLoop(int entryNf) {
             if (kd == K::Object) {
                 ObjObj* ob = (ObjObj*)recv->o;
                 StrObj* name = syms[(size_t)ins->a];
+                if(ob->scriptedAccess) {
+                    SYNC();Value f=getField(*recv,name,ins->a);*recv=f;goto do_call;
+                }
                 Value f;
                 bool found = false;
                 size_t n = ob->f.size(), h = ins->x;
@@ -1269,6 +1353,26 @@ Value VM::Impl::runLoop(int entryNf) {
     CASE(TRY) { handlers.push_back(Handler{nf, code + ins->a, sp}); NEXT(); }
     CASE(ENDTRY) { handlers.pop_back(); NEXT(); }
     CASE(THROW) { Value v = sp[-1]; SYNC(); throw Thrown{v, std::string(), false}; }
+    CASE(ENUMCHECK) {
+        Value v=sp[-1], result=Value::Bool(false);
+        std::string spec=asStr(consts[ins->a])->s;
+        size_t sep=spec.find('|');
+        if(v.t==Type::Obj && v.o->kind==K::Object) {
+            ObjObj* o=(ObjObj*)v.o;
+            Value type=objGet(o,intern("__ss_enum")),tag=objGet(o,intern("tag")),params=objGet(o,intern("params"));
+            if(type.t==Type::Obj && type.o->kind==K::String) result=Value();
+            bool ok=type.t==Type::Obj && type.o->kind==K::String && tag.t==Type::Obj && tag.o->kind==K::String &&
+               params.t==Type::Obj && params.o->kind==K::Array &&
+               (sep==0 || asStr(type)->s==spec.substr(0,sep)) && asStr(tag)->s==spec.substr(sep+1) &&
+               ((ArrObj*)params.o)->v.size()==ins->b;
+            if(ok) result=params;
+        } else if(v.t==Type::Obj && v.o->kind==K::Host && hcb.method) {
+            SYNC();
+            Value args[]={consts[ins->a],Value::Int(ins->b)};
+            result=hostMethod(v,"__ss_match_enum",args,2);
+        }
+        sp[-1]=result;NEXT();
+    }
     CASE(ISTYPE) {
         const std::string& tn = asStr(consts[ins->a])->s;
         bool r = isOfType(sp[-1], tn);
@@ -1365,6 +1469,11 @@ CASE(ADDI) {
         Value& v = sp[-1];
         if (v.t == Type::Null || v.t == Type::Undef) NEXT();
         switch (ins->b) {
+            case 6: {
+                std::string type=asStr(consts[ins->a])->s;
+                if(isOfType(v,type))NEXT();
+                FAILX("Cannot cast "+typeName(v)+" to "+type);
+            }
             case 1: if (isStrV(v)) NEXT(); FAILX("Cannot cast " + typeName(v) + " to String");
             case 2: if (v.t == Type::Bool) NEXT(); FAILX("Cannot cast " + typeName(v) + " to Bool");
             case 3:

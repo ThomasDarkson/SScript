@@ -66,6 +66,7 @@ public:
         fs_ = nullptr;
         if (info_) {
             for (auto& n : usedOrder_) if (!declared_.count(n)) info_->needs.push_back(n);
+            info_->eagerNeeds = eager_;
             for (auto& n : declared_) info_->declared.push_back(n);
         }
         return fs.p;
@@ -76,21 +77,25 @@ private:
     std::string origin_;
     FuncState* fs_ = nullptr;
     int line_ = 1;
-    std::unordered_map<std::string, std::string> aliases_;
     Program* info_ = nullptr;
+    bool conditionalNeeds_ = false;
     std::vector<std::string> usedOrder_;
     std::unordered_set<std::string> used_, declared_;
-    std::unordered_set<std::string> topDeclared_;
+    std::unordered_set<std::string> eager_;
+    std::unordered_set<std::string> topDeclared_, scriptTypes_;
     void collectTopLevel(Node* root) {
         if (!root) return;
         for (Node* st : root->list) {
             if (!st) continue;
-            if (st->k == N::Var) topDeclared_.insert(st->s);
+            if (st->k == N::Var) {topDeclared_.insert(st->s);if(st->s2=="__ss_enum"||st->s2=="__ss_type")scriptTypes_.insert(st->s);}
             else if (st->k == N::Vars) { for (Node* v : st->list) if (v) topDeclared_.insert(v->s); }
             else if (st->k == N::Func && !st->s.empty()) topDeclared_.insert(st->s);
         }
     }
-    void useGlobal(const std::string& name) { if (used_.insert(name).second) usedOrder_.push_back(name); }
+    void useGlobal(const std::string& name) {
+        if (used_.insert(name).second) usedOrder_.push_back(name);
+        if (fs_->isMain && !conditionalNeeds_) eager_.insert(name);
+    }
     void unsupported(const std::string& why) { if (info_ && info_->unsupported.empty()) info_->unsupported = why; }
 
     [[noreturn]] void err(const std::string& m, int line = -1) {
@@ -209,10 +214,8 @@ private:
             return r;
         }
         r.k = Res::Global;
-        auto al = aliases_.find(name);
-        const std::string& real = al != aliases_.end() ? al->second : name;
-        useGlobal(real);
-        r.idx = vm_.globalSlot(real);
+        useGlobal(name);
+        r.idx = vm_.globalSlot(name);
         return r;
     }
 
@@ -361,10 +364,10 @@ private:
                 return;
             }
             case N::Regex: {
-                unsupported("regular expression literal");
+                useGlobal("__ss_regex");
                 emit(OP_CONST, strConst(n->s));
                 emit(OP_CONST, strConst(n->s2));
-                emit(OP_NEW, strConst("EReg"), 2);
+                emit(OP_NEW, strConst("__ss_regex"), 2);
                 if (!want) emit(OP_POP);
                 return;
             }
@@ -543,18 +546,11 @@ private:
                 return;
             }
             case N::New: {
-                if (n->s == "EReg") unsupported("EReg");
-                else if (!vm_.classes.count(n->s)) {
-                    if (n->s.find('.') != std::string::npos) unsupported("new " + n->s);
-                    else {
-                        auto al = aliases_.find(n->s);
-                        if (al != aliases_.end()) { n->s = al->second; }
-                        useGlobal(n->s);
-                    }
-                }
+                const auto& name = n->s;
+                if (name == "EReg" || !vm_.classes.count(name)) useGlobal(name);
                 for (Node* e : n->list) expr(e, true);
                 at(n);
-                emit(OP_NEW, strConst(n->s), (int)n->list.size());
+                emit(OP_NEW, strConst(name), (int)n->list.size());
                 if (!want) emit(OP_POP);
                 return;
             }
@@ -567,10 +563,9 @@ private:
                 return;
             }
             case N::Import: {
-                if (!n->s2.empty()) aliases_[n->s2] = n->s;
-                if (info_) {
-                    if (n->iv) unsupported("wildcard import");
-                    else if (!n->names.empty()) info_->imports.push_back({n->s2.empty() ? n->s : n->s, n->names[0]});
+                if (info_ && !n->names.empty()) {
+                    const auto& local = n->s2.empty() ? n->s : n->s2;
+                    info_->imports.push_back({n->iv ? "" : local, n->names[0]});
                 }
                 if (want) emit(OP_NULL_);
                 return;
@@ -581,10 +576,11 @@ private:
                 return;
             case N::Cast: {
                 int code = n->s == "String" ? 1 : n->s == "Bool" ? 2 : n->s == "Int" ? 3 : n->s == "Float" ? 4 : n->s == "Array" ? 5 : 0;
+                if(code==0 && scriptTypes_.count(n->s))code=6;
                 expr(n->a, want || code != 0);
                 if (code == 0) return;
                 at(n);
-                emit(OP_CAST, 0, code);
+                emit(OP_CAST, code==6?strConst(n->s):0, code);
                 if (!want) emit(OP_POP);
                 return;
             }
@@ -974,38 +970,89 @@ private:
         for (int e : ends) patchHere(e);
     }
 
-    void switchStmt(Node* n, bool want) {
-        int tmp = allocSlot();
-        expr(n->a, true);
-        at(n);
-        emit(OP_SETLOCALP, tmp);
-        std::vector<int> ends;
-        for (CaseC& c : n->cases) {
-            std::vector<int> toBody;
-            for (Node* v : c.values) {
-                if (v->k == N::Call) unsupported("enum pattern in switch");
-                emit(OP_LOCAL, tmp);
-                expr(v, true);
-                at(v);
-                emit(OP_EQ);
-                toBody.push_back(emit(OP_JMPT));
-            }
-            int jnext = -1;
-            if (!c.values.empty()) jnext = emit(OP_JMP);
-            for (int j : toBody) patchHere(j);
-            int jguard = -1;
-            if (c.guard) {
-                expr(c.guard, true);
-                jguard = emit(OP_JMPF);
-            }
-            expr(c.body, want);
-            ends.push_back(emit(OP_JMP));
-            if (jnext >= 0) patchHere(jnext);
-            if (jguard >= 0) patchHere(jguard);
+
+    void patternNames(Node* p, std::unordered_set<std::string>& out, bool nested=false) {
+        if(p->k==N::Ident && nested && p->s!="_" && p->s!="null" && p->s!="true" && p->s!="false") out.insert(p->s);
+        if(p->k==N::Call) for(auto* a:p->list) patternNames(a,out,true);
+    }
+    std::string patternOwner(Node* owner) {
+        if(owner->k==N::Ident) return owner->s;
+        if(owner->k==N::Field) return patternOwner(owner->a)+"."+owner->s;
+        err("Invalid enum pattern qualifier",owner->line);
+    }
+    void emitPattern(Node* p,int value,std::vector<int>& failures,bool nested=false,
+                     const std::function<void()>& expressionBody={}) {
+        if(p->k==N::Ident && p->s=="_") return;
+        if(p->k==N::Ident && nested && p->s!="null" && p->s!="true" && p->s!="false") {
+            emit(OP_LOCAL,value);emitStore(resolve(p->s),false,p->s);return;
         }
-        if (n->b) expr(n->b, want);
-        else if (want) emit(OP_NULL_);
-        for (int e : ends) patchHere(e);
+        if(p->k==N::Call && (p->a->k==N::Ident || p->a->k==N::Field)) {
+            std::string tag=p->a->s, type;
+            if(p->a->k==N::Field) type=patternOwner(p->a->a);
+            int params=allocSlot();
+            emit(OP_LOCAL,value);emit(OP_ENUMCHECK,strConst(type+"|"+tag),(int)p->list.size());
+            emit(OP_SETLOCALP,params);
+            if(expressionBody) {
+                emit(OP_LOCAL,params);emit(OP_FALSE_);emit(OP_EQ);
+                int enumPattern=emit(OP_JMPF);
+                emit(OP_LOCAL,value);
+                auto bindings=std::move(fs_->scopes.back());
+                fs_->scopes.back().clear();
+                bool savedConditional=conditionalNeeds_;
+                conditionalNeeds_=true;
+                expr(p,true);
+                emit(OP_EQ);failures.push_back(emit(OP_JMPF));
+                int nextSlot=fs_->nextSlot;
+                expressionBody();
+                conditionalNeeds_=savedConditional;
+                fs_->nextSlot=nextSlot;
+                fs_->scopes.back()=std::move(bindings);
+                patchHere(enumPattern);
+            }
+            emit(OP_LOCAL,params);
+            failures.push_back(emit(OP_JMPF));
+            for(size_t i=0;i<p->list.size();i++) {
+                int child=allocSlot();
+                emit(OP_LOCAL,params);emit(OP_INT,(int)i);emit(OP_GETI);emit(OP_SETLOCALP,child);
+                emitPattern(p->list[i],child,failures,true);fs_->nextSlot--;
+            }
+            fs_->nextSlot--;
+            return;
+        }
+        emit(OP_LOCAL,value);expr(p,true);at(p);emit(OP_EQ);failures.push_back(emit(OP_JMPF));
+    }
+    void switchStmt(Node* n, bool want) {
+        int tmp = allocSlot();expr(n->a,true);at(n);emit(OP_SETLOCALP,tmp);
+        std::vector<int> ends;
+        for(CaseC& c:n->cases) {
+            pushScope();
+            std::unordered_set<std::string> bindings;
+            if(!c.values.empty()) patternNames(c.values[0],bindings);
+            for(Node* p:c.values) {
+                std::unordered_set<std::string> names;patternNames(p,names);
+                if(names!=bindings) err("Switch alternatives must bind the same names",p->line);
+            }
+            for(const auto& name:bindings) {emit(OP_NULL_);emitDecl(declare(name,false));}
+            std::vector<int> toBody;
+            for(Node* p:c.values) {
+                std::vector<int> failures;
+                emitPattern(p,tmp,failures,false,[&] {
+                    if(c.guard) {expr(c.guard,true);failures.push_back(emit(OP_JMPF));}
+                    expr(c.body,want);ends.push_back(emit(OP_JMP));
+                });
+                if(c.guard) {expr(c.guard,true);failures.push_back(emit(OP_JMPF));}
+                toBody.push_back(emit(OP_JMP));
+                for(int j:failures) patchHere(j);
+            }
+            int jnext=c.values.empty()?-1:emit(OP_JMP);
+            for(int j:toBody) patchHere(j);
+            if(c.values.empty() && c.guard) {expr(c.guard,true);jnext=emit(OP_JMPF);}
+            expr(c.body,want);ends.push_back(emit(OP_JMP));
+            if(jnext>=0)patchHere(jnext);
+            popScope();
+        }
+        if(n->b)expr(n->b,want);else if(want)emit(OP_NULL_);
+        for(int j:ends)patchHere(j);
         fs_->nextSlot--;
     }
 

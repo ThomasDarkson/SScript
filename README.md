@@ -1,8 +1,10 @@
-[![](https://thomasdarkson.com/assets/stickers/sticker.png)](https://thomasdarkson.com)
+[<p align="center"><img src="https://thomasdarkson.com/assets/stickers/sticker.png" style="width:30%; height:auto;"></p>](https://thomasdarkson.com)
 
-[<img src="https://thomasdarkson.com/sscript/logo_with_version.png" style="width:35%; height:auto;">](https://thomasdarkson.com)
+[<p align="center"><img src="https://thomasdarkson.com/sscript/logo.png" style="width:35%; height:auto;"></p>](https://thomasdarkson.com)
 
-# SScript
+<p align="center"><img src="https://stats.thomasdarkson.com/?repo=ThomasDarkson/SScript"></p>
+
+<h1 align="center">SScript</h1>
 
 SScript (also known as SuperlativeScript) is a fork of HScript with fixes and improvements.
 
@@ -78,6 +80,287 @@ class Main {
 ```
 
 ### New features
+
+#### Classes
+With the release of 25.0.0, SScript supports classes, interfaces and enums! **Extending compiled Haxe classes and implementing native Haxe interfaces are supported on C++ only.** Any other feature works regardless of platform.
+
+##### Classes and properties
+
+```haxe
+import hscript.SScript;
+
+class Main {
+    static function main() {
+		var s = new SScript();
+        s.doString("
+            class Counter 
+            {
+                static var created:Int = 0;
+                final name:String;
+                var value(get, set):Int = 0;
+
+                function new(name:String, initial:Int = 0) {
+                    this.name = name;
+                    value = initial;
+                    created++;
+                }
+
+                function get_value():Int {
+                    return value;
+                }
+
+                function set_value(next:Int):Int {
+                    value = next < 0 ? 0 : next;
+                    return value;
+                }
+
+                function increment():Int {
+                    return ++value;
+                }
+            }
+
+            var counter = new Counter('score', 5);
+            var increment = counter.increment;
+            trace(increment());      // [SScript #1]:30: 6
+            counter.value = -10;
+            trace(counter.value);    // [SScript #1]:32: 0
+            trace(counter.name);     // [SScript #1]:33: score
+            trace(Counter.created);  // [SScript #1]:34: 1
+        ");
+    }
+}
+```
+
+##### Inheritance, interfaces, and type checks
+
+```haxe
+import hscript.SScript;
+
+class Main {
+    static function main() {
+		var s = new SScript();
+        s.doString("
+            interface Named {
+                function describe():String;
+            }
+
+            interface Scored extends Named {
+                function points():Int;
+            }
+
+            class Entry implements Named {
+                var title:String;
+
+                function new(title:String) {
+                    this.title = title;
+                }
+
+                function describe():String {
+                    return title;
+                }
+            }
+
+            class Player extends Entry implements Scored {
+                var score:Int;
+
+                function new(title:String, score:Int = 0) {
+                    super(title);
+                    this.score = score;
+                }
+
+                function points():Int {
+                    return score;
+                }
+
+                override function describe():String {
+                    return super.describe() + ': ' + score;
+                }
+            }
+
+            var player = new Player('Ada', 10);
+            trace(player.describe());             // [SScript #1]:40: Ada: 10
+            trace(player is Entry);               // [SScript #1]:41: true
+            trace(player is Named);               // [SScript #1]:42: true
+            trace(cast(player, Scored).points()); // [SScript #1]:43: 10
+
+            try 
+            {
+                throw player;
+            } 
+            catch (entry:Named) 
+            {
+                trace(entry.describe());       // [SScript #1]:48: Ada: 10
+            }
+        ");
+    }
+}
+```
+
+##### Enums and pattern matching
+
+```haxe
+import hscript.SScript;
+
+class Main {
+    static function main() {
+		var s = new SScript();
+        s.doString("
+            enum Result {
+                Empty;
+                Value(number:Int);
+                Pair(left:Result, right:Result);
+            }
+
+            var result = Result.Pair(Result.Value(3), Result.Value(4));
+
+            var total = switch (result) {
+                case Result.Pair(Result.Value(a), Result.Value(b)): a + b;
+                default: 0;
+            };
+
+            trace(total);             // [SScript #1]:15: 7
+            trace(result is Result);  // [SScript #1]:16: true
+        ");
+    }
+}
+```
+
+##### Extending Native Haxe Classes and implementing Native Interfaces (**C++ only**)
+In C++ target, you can extend any Haxe class that [DCE](https://haxe.org/manual/cr-dce.html) has not eliminated.
+You can override their methods, and call `super`.
+
+`game/Actor.hx`, a real Haxe class:
+```haxe
+package game;
+
+class Actor {
+    public function new() {}
+
+    public function speak():String {
+        return "actor";
+    }
+
+    public function announce():String {
+        return speak();
+    }
+}
+```
+
+`Main.hx`:
+```haxe
+import hscript.SScript;
+import game.Actor;
+
+class Main {
+    static function main() {
+		var s = new SScript();
+        s.doString("
+            import game.Actor;
+
+            class Guard extends Actor {
+                function new() {
+                    super();
+                }
+
+                override function speak():String {
+                    return super.speak() + ' on duty';
+                }
+            }
+
+            trace(new Guard().announce()); // [SScript #1]:14: actor on duty
+        ");
+    }
+}
+```
+
+You can implement interfaces too.
+
+```haxe
+import hscript.SScript;
+import Main.FakeMap;
+class Main {
+    static function main() {
+		var s = new SScript();
+        s.doString("
+            import Main.FakeMap;
+
+            class FMap implements FakeMap
+            {
+                var map:Map<String, Dynamic> = new Map();
+                public function new() {}
+
+                public function get(k:String):Dynamic
+                {
+                    return map.get(k);
+                }
+
+                function set(k:String, v:Dynamic):Void
+                {
+                    map.set(k, v);
+                }
+            }
+
+            var f:FMap = new FMap();
+            f.set('64bit', 4294967296.0);
+            trace(f.get('64bit')); // [SScript #1]:22: 4294967296
+        ");
+    }
+}
+
+interface FakeMap {
+    function get(k:String):Dynamic;
+    function set(k:String, v:Dynamic):Void;
+}
+```
+
+##### Sharing types between scripts
+
+Scripts can share types between each other, even if you are using files, but there are a few things that are worth knowing.
+
+`enemy.hx`:
+```haxe
+class Enemy {
+    function describe():String {
+        return "enemy";
+    }
+}
+```
+
+`boss.hx`:
+```haxe
+class Boss extends Enemy {
+    override function describe():String {
+        return "boss " + super.describe();
+    }
+}
+
+trace(new Boss().describe()); // boss enemy
+```
+
+The `Boss` class extends Enemy, but for it to work `enemy.hx` must be loaded first. There are two ways to do this:
+
+- Option 1:
+
+Load `enemy.hx` manually.
+```haxe
+var enemies = new hscript.SScript("enemy.hx");
+var bosses = new hscript.SScript("boss.hx");
+```
+
+This way, `Boss` can see `Enemy` class.
+
+- Option 2: Rename the script(s) with the classes you want to use later.
+
+If you are listing a folder with scripts and creating `SScript` objects, `boss.hx` will always load first because the files are listed by name, and "**b**oss.hx" comes first. To load a script with the classes you want to share between other scripts first, rename the script. For example, adding 1 to the start of `enemy.hx` it becomes `1enemy.hx`, which will load first.
+
+The rule above doesn't apply if the script is extending a compiled Native Haxe class (**C++ only**), however if it is extending a class from another script that extends a native class, this rule applies too.
+
+##### Limitations
+- `private` is accepted and parsed, but it doesn't enforce visiblity. Everything is public.
+- Generic script classes such as `class Box<T>`, `abstract` and `extern`, and macros inside scripts are unsupported. `inline` is accepted without inlining. 
+- Even though it may seem like script classes are real classes, they are not. In reality, they are runtime values. `Type.createInstance`, `Type.getEnum`, and `Type.enumParameters` and similar methods won't see script classes.
+- Final native classes can’t be extended. (**C++ only**)
+- Extending native Haxe classes and interfaces are **C++ only**. This sets the define `scriptable` automatically which compiles `cppia`. SScript has safeguards for any cppia incompatibility, but compiling successfully is not guaranteed. If you get an error while compiling with SScript 25.0.0 or newer, please open an issue and it will be fixed.
 
 #### Import
 
@@ -392,11 +675,11 @@ class Main {
 *Not to be confused with Compiled Functions, that uses the regular interpreter*
 
 On C++ targets, SScript can run scripts on SSVM, a bytecode virtual machine written in C++, instead of the interpreter. It is used automatically.
+
+SSVM supports regular expressions, dotted class construction, wildcard imports, and pattern matching on script and compiled Haxe enums. Host classes and enums must be available in the compiled application.
  
 Scripts the VM can't run safely silently use the regular interpreter, so the result is the same either way. A script falls back to the interpreter if it:
-- uses regular expressions (`~/.../` or `EReg`)
-- uses `new` on a dotted class path (e.g. `new sys.io.File`), wildcard imports (`import haxe.*;`), or `using` (anything other than `StringTools`)
-- uses enum pattern matching in `switch` (e.g. `case Type(x)`)
+- uses `using` (anything other than `StringTools`)
 - uses a name that can't be resolved when the script is compiled
 - fails to compile
 - is sandboxed
@@ -426,11 +709,7 @@ flowchart TD
     D -- Yes --> INT
     D -- No --> F{"Unsupported Features:"}
 
-    F -- "Regular expressions<br/>(~/.../ or EReg)" --> Y["Script contains any of the above?"]
-    F -- "Dotted class construction<br/>(new haxe.Serializer())" --> Y
-    F -- "Wildcard imports<br/>(import haxe.*)" --> Y
-    F -- "Unsupported using<br/>(using MyClass)" --> Y
-    F -- "Enum pattern matching<br/>(case Type(x))" --> Y
+    F -- "Unsupported using<br/>(using MyClass)" --> Y["Script contains any of the above?"]
     F -- "Unresolved names" --> Y
 
     Y -- Yes --> INT

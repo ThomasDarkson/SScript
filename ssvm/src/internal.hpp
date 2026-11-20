@@ -59,6 +59,7 @@ struct MapObj : Obj {
 
 struct Field { StrObj* k; Value v; };
 struct ObjObj : Obj {
+    bool scriptedAccess = false;
     std::vector<Field> f;
     ObjObj() : Obj(K::Object) {}
 };
@@ -132,7 +133,7 @@ struct RegexObj : Obj {
     X(ITER) X(ITERNEXT) X(ITERNEXT2) X(RANGENEXT) X(TRY) X(ENDTRY) X(THROW) X(ISTYPE) X(TOBOOL) \
     X(INCL) X(BOXINC) X(LOOP) X(ADDI) \
     X(JFLT) X(JFLE) X(JFGT) X(JFGE) X(JFEQ) X(JFNE) X(JFLTI) X(JFLEI) X(JFGTI) X(JFGEI) X(JFEQI) X(JFNEI) \
-    X(CAST)
+    X(CAST) X(ENUMCHECK)
 
 enum Op : uint8_t {
 #define X(n) OP_##n,
@@ -171,6 +172,7 @@ struct Proto {
 struct Program {
     Proto* main = nullptr;
     std::vector<std::string> needs;
+    std::unordered_set<std::string> eagerNeeds;
     std::vector<std::string> declared;
     std::string unsupported;
     std::vector<std::pair<std::string, std::string>> imports;
@@ -183,7 +185,7 @@ enum class N : uint8_t {
 };
 
 struct Node;
-struct Param { std::string name; Node* def = nullptr; bool opt = false; };
+struct Param { std::string name, type; Node* def = nullptr; bool opt = false; };
 struct CatchC { std::string var, type; Node* body = nullptr; };
 struct CaseC { std::vector<Node*> values; Node* guard = nullptr; Node* body = nullptr; };
 
@@ -381,6 +383,8 @@ struct VM::Impl {
     Value getIndex(Value obj, Value idx);
     void  setIndex(Value obj, Value idx, Value v);
     Value objGet(ObjObj* o, StrObj* k);
+    Value scriptRawGet(ObjObj* o, StrObj* k);
+    void scriptRawSet(ObjObj* o, StrObj* k, Value v);
     void  objSet(ObjObj* o, StrObj* k, Value v);
     bool  mapGet(MapObj* m, const Value& k, Value& out);
     void  mapSet(MapObj* m, const Value& k, const Value& v);

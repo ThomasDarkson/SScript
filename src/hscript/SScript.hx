@@ -117,7 +117,7 @@ typedef FunctionCall =
 @:keepSub
 class SScript
 {
-	public static final SSCRIPT_VERSION:String = "24.0.0";
+	public static final SSCRIPT_VERSION:String = "25.0.0";
 	
 	/**
 		If not null, enables the improved field system for every script.
@@ -386,6 +386,13 @@ class SScript
 	**/
 	public var active:Bool = true;
 
+	/** 
+		Whether to keep the classes in this script after it is destroyed.
+
+		If this is false, when this script is destroyed, the classes that was made in it will be permanently deleted.
+	**/
+	public var keepTypesOnDestroy:Bool = true;
+
 	/**
 		Read-only path of the script file, if loaded from disk.
 	**/
@@ -438,6 +445,86 @@ class SScript
 		Most recent parsing error, if any.
 	**/
 	public var parsingException(default, null):Exception;
+
+	/**
+		Most recent parsing error in an array, if any.
+
+		Here for backward compatibility reasons.
+	**/
+	@:deprecated('Use parsingException instead')
+	public var parsingExceptions(get, never):Array<Exception>;
+
+	/**
+		If not `null`, this will execute when any exception is caught.
+	**/
+	public var onError:(exception:Dynamic, script:SScript) -> Void = null;
+
+	/**
+		Used if `onError` is null. 
+		
+		If not `null`, this will execute when any exception is caught.
+	**/
+	public static var defaultOnError:(exception:Dynamic, script:SScript)->Void = null;
+
+	/** 
+		The last exception caught. May be `null`!
+	**/
+	public var lastError(default, null):Dynamic = null;
+
+	var lastErrorHandlerException(default, null):Dynamic = null;
+
+	@:noCompletion public var errorBoundaryDepth(default, null):Int = 0;
+	var reportingError:Bool = false;
+	var reportedErrors:Array<Dynamic> = [];
+
+	@:noCompletion public function reportError(error:Dynamic):Void
+	{
+		if (reportingError) 
+			return;
+		var raw:Dynamic = Std.isOfType(error, Exception) ? @:privateAccess (cast error:Exception).unwrap() : error;
+		for (previous in reportedErrors) 
+			if (previous == raw) 
+				return;
+		if (errorBoundaryDepth > 0) 
+			reportedErrors.push(raw);
+		lastError = error;
+		lastErrorHandlerException = null;
+		var handler = onError != null ? onError : defaultOnError;
+		if (handler == null) 
+			return;
+		reportingError = true;
+		try 
+		{ 
+			handler(error, this); 
+		}
+		catch (handlerError:Dynamic) 
+		{ 
+			lastErrorHandlerException = handlerError; 
+		}
+		reportingError = false;
+	}
+
+	@:noCompletion public function withErrorBoundary<T>(body:Void->T):T
+	{
+		var previousErrors = reportedErrors;
+		reportedErrors = [];
+		errorBoundaryDepth++;
+		try 
+		{
+			var result = body();
+			errorBoundaryDepth--;
+			reportedErrors = previousErrors;
+			return result;
+		} 
+		catch (error:Dynamic) 
+		{
+			if (errorBoundaryDepth == 1) 
+				reportError(error);
+			errorBoundaryDepth--;
+			reportedErrors = previousErrors;
+			throw error;
+		}
+	}
 
 	/**
 		Package path of this script.
@@ -552,6 +639,7 @@ class SScript
 		catch (e)
 		{
 			lastReportedTime = -1;
+			reportError(e);
 		}
 	}
 
@@ -563,6 +651,15 @@ class SScript
 		Don't call this if the script was already executed when creating its instance with the `startExecute` argument set to true.
 	**/
 	public function execute():Void
+	{
+		withErrorBoundary(function() { executeInternal(); return null; });
+
+		#if (SSCRIPT_VM_ECHO && sys)
+		Sys.println(this + " ran on VM?: " + this.runsOnVM);
+		#end
+	}
+
+	function executeInternal():Void
 	{
 		if (_destroyed || !active)
 			return;
@@ -588,32 +685,24 @@ class SScript
 			{
 				try 
 				{
-					var vm = tryVM(script, origin);
-					#if SSCRIPT_SSVM_ECHO
-					trace(toString() + " ran in VM?: " + this.runsOnVM);
-					#end
-					if (!vm)
-					{
-						var expr:Expr = null;
-						if (scriptCache.exists(script))
-							expr = scriptCache.get(script);
-						else 
-						{
-							expr = parser.parseString(script, origin);
-							scriptCache.set(script, expr);
-						}
-						var r = interp.execute(expr);
-						returnValue = r;
-					}
+                    var shared = SharedTypes.prepare(this, script, !hscriptSandboxed, origin);
+                    var vm = tryVM(shared.source, origin);
+                    if (!vm)
+						returnValue = hscript.native.NativeTypes.unwrap(interp.execute(shared.expr));
+                    if (parsingException == null)
+						SharedTypes.publish(this, shared);
+                    else 
+						reportError(parsingException);
 				}
 				catch (e) 
 				{
 					parsingException = e;				
 					returnValue = null;
 					scriptCache.remove(script);
+					reportError(e);
 				}
 				
-				if (defaultFunc != null) 
+				if (defaultFunc != null && parsingException == null) 
 				{
 					shouldWarn = false;
 					call(defaultFunc.functionName, defaultFunc.arguments);
@@ -1051,11 +1140,11 @@ class SScript
 		#end
 
 		if (interp.locals.exists(key))
-       		return interp.locals.get(key);
+       		return hscript.native.NativeTypes.unwrap(interp.locals.get(key));
 		else if (interp.finalVariables.exists(key))
-			return interp.finalVariables.get(key);
+			return hscript.native.NativeTypes.unwrap(interp.finalVariables.get(key));
 
-		return interp.variables.get(key);
+		return hscript.native.NativeTypes.unwrap(interp.variables.get(key));
 	}
 
 	/**
@@ -1070,6 +1159,16 @@ class SScript
 		@return Returns a `FunctionCall` object.
 	**/
 	public function call(func:String, ?args:Array<Dynamic> = null, ?className:String):FunctionCall
+	{
+		return withErrorBoundary(function() {
+			var result = callInternal(func, args, className);
+			if (!result.succeeded && (shouldWarn || exists(func)))
+				for (error in result.exceptions) reportError(error);
+			return result;
+		});
+	}
+
+	function callInternal(func:String, ?args:Array<Dynamic>, ?className:String):FunctionCall
 	{
 		if (_destroyed)
 			return {
@@ -1158,7 +1257,7 @@ class SScript
 					exceptions: caller.exceptions,
 					calledFunction: func,
 					succeeded: true,
-					returnValue: functionField,
+					returnValue: hscript.native.NativeTypes.unwrap(functionField),
 					lastReportedTime: -1
 				};
 				caller.lastReportedTime = Timer.stamp() - time;
@@ -1254,6 +1353,8 @@ class SScript
 		if (_destroyed)
 			return;
 
+        SharedTypes.remove(this);
+        interp.nativeLifetime++;
 		interp.locals = new Map();
 		interp.localsOuter = null;
 		while (interp.declared.length > 0)
@@ -1354,6 +1455,15 @@ class SScript
 	**/
 	public function doString(string:String, ?origin:String):SScript
 	{
+		var v = withErrorBoundary(function() return doStringInternal(string, origin));
+		#if (SSCRIPT_VM_ECHO && sys)
+		Sys.println(this + " ran on VM?: " + this.runsOnVM);
+		#end
+		return v;
+	}
+
+	function doStringInternal(string:String, ?origin:String):SScript
+	{
 		if (_destroyed)
 			return null;
 		if (!active)
@@ -1400,24 +1510,23 @@ class SScript
 			{
 				try 
 				{
-					var vm = tryVM(script, og);
-					#if SSCRIPT_SSVM_ECHO
-					trace(toString() + " ran in VM?: " + this.runsOnVM);
-					#end
-					if (!vm)
-					{
-						var expr:Expr = parser.parseString(script, og);
-						var r = interp.execute(expr);
-						returnValue = r;
-					}
+                    var shared = SharedTypes.prepare(this, script, !hscriptSandboxed, og);
+                    var vm = tryVM(shared.source, og);
+                    if (!vm)
+						returnValue = hscript.native.NativeTypes.unwrap(interp.execute(shared.expr));
+                    if (parsingException == null)
+						SharedTypes.publish(this, shared);
+                    else 
+						reportError(parsingException);
 				}
 				catch (e) 
 				{
 					parsingException = e;				
 					returnValue = null;
+					reportError(e);
 				}
 
-				if (defaultFunc != null)
+				if (defaultFunc != null && parsingException == null)
 				{
 					shouldWarn = false;
 					call(defaultFunc.functionName, defaultFunc.arguments);
@@ -1430,7 +1539,11 @@ class SScript
 			lastReportedTime = Timer.stamp() - time;
 			debugTrace("doString()");
 		}
-		catch (e) lastReportedTime = -1;
+		catch (e) {
+			lastReportedTime = -1;
+			parsingException = e;
+			reportError(e);
+		}
 
 		return this;
 	}
@@ -1445,7 +1558,7 @@ class SScript
 		var so:Dynamic = interp.specialObject != null ? interp.specialObject.obj : null;
 		var soFields:Array<String> = so != null ? interp.specialObjectsFields : null;
 
-		var b = SSVMBackend.create(code, origin, function(n:String):Dynamic
+		var b = SSVMBackend.create(hscript.native.NativeTypes.source(code,!hscriptSandboxed), origin, function(n:String):Dynamic
 		{
 			if (interp.finalVariables.exists(n))
 				return interp.finalVariables.get(n);
@@ -1455,6 +1568,7 @@ class SScript
 			return false;
 
 		vmBackend = b;
+		b.owner = this;
 		var err = b.run();
 		if (err != null)
 		{
@@ -1551,21 +1665,51 @@ class SScript
 	}
 
 	/**
-		This function makes this script instance completely unusable and impossible to restore.
+		This function makes this script instance completely unusable and impossible to restore. 
+		Any class, interface or enum that was created in this script is permanently destroyed unless `keepTypesOnDestroy` is true.
 
 		If you don't want to destroy your script just yet, just set `active` to false!
 
 		Override this function if you set up other variables to destroy them.
+
+		`unload()` ignores `keepTypesOnDestroy`, and will destroy the script completely.
 	**/
 	public function destroy():Void
 	{
 		if (_destroyed)
 			return;
 
-		if (scriptFile != null && scriptFile.length > 0 && global.exists(scriptFile))
+		if (keepTypesOnDestroy && SharedTypes.hasDefinitions(this))
+		{
+			detachGlobal();
+			active = false;
+			return;
+		}
+		destroyNow();
+	}
+
+	/** 
+		The same thing as `destroy()`, but this function ignores `keepTypesOnDestroy` and will destroy the script completely.
+	**/
+	public function unload():Void
+	{
+		destroyNow();
+	}
+
+	function detachGlobal():Void
+	{
+		if (scriptFile != null && scriptFile.length > 0 && global.get(scriptFile) == this)
 			global.remove(scriptFile);
-		if (ID != null && global.exists(Std.string(ID)))
+		if (ID != null && global.get(Std.string(ID)) == this)
 			global.remove(Std.string(ID));
+	}
+
+	function destroyNow():Void
+	{
+		if (_destroyed)
+			return;
+
+		detachGlobal();
 
 		removeSpecialObject();
 		destroyVM();
@@ -1689,5 +1833,10 @@ class SScript
 		#else
 		return false;
 		#end
+	}
+
+	function get_parsingExceptions():Array<Exception> 
+	{
+		return parsingException == null ? [] : [parsingException];
 	}
 }

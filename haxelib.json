@@ -9,7 +9,7 @@
         "script"
     ],
     "description": "SScript (also known as SuperlativeScript), fork of HScript with fixes and improvements.",
-    "version": "24.0.0",
+    "version": "25.0.0",
     "classPath": "src/",
     "releasenote": "Check CHANGELOG.md",
     "contributors": [

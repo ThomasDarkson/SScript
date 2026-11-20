@@ -372,12 +372,15 @@ private:
     void lexRegex(Token& t) {
         pos += 2;
         std::string pat;
+        bool inClass = false;
         for (;;) {
             if (pos >= s.size() || s[pos] == '\n') fail(origin, line, "Unterminated regular expression");
             char c = s[pos];
             if (c == '\\' && at(1) == '/') { pat += '/'; pos += 2; continue; }
             if (c == '\\') { pat += c; pat += at(1); pos += 2; continue; }
-            if (c == '/') { pos++; break; }
+            if (c == '/' && !inClass) { pos++; break; }
+            if (c == '[') inClass = true;
+            if (c == ']') inClass = false;
             pat += c;
             pos++;
         }
@@ -736,6 +739,11 @@ private:
         return name;
     }
 
+    std::string signatureType() {
+        size_t start=p_;skipType();std::string text;
+        for(size_t i=start;i<p_;i++)text+=tokText(toks_[i]);
+        return text;
+    }
     Node* parseInterp(const Token& t) {
         Node* n = mk(N::Interp, t.line);
         for (const StrPart& part : t.parts) {
@@ -789,8 +797,14 @@ private:
             Param pr;
             if (peek().k == T_QUEST) { next(); pr.opt = true; }
             pr.name = ident();
-            if (peek().k == T_COLON) { next(); skipType(); }
-            if (isOp("=")) { next(); pr.def = parseExpr(); }
+            if (peek().k == T_COLON) { next(); pr.type=signatureType(); }
+            if (isOp("=")) {
+                next(); pr.def = parseExpr();
+                Node* value = pr.def;
+                bool constant = value->k==N::Int || value->k==N::Float || value->k==N::Str ||
+                    (value->k==N::Ident && (value->s=="null" || value->s=="true" || value->s=="false"));
+                if (!constant || value->paren) err("Default argument value should be constant",value->line);
+            }
             f->params.push_back(pr);
             if (peek().k == T_COMMA) { next(); continue; }
             expect(T_RP, "')'");
@@ -798,12 +812,389 @@ private:
         }
     }
 
+
+
+    struct DeclMember {
+        std::string name,owner,get,set,type;
+        bool stat=false,over=false,fin=false,method=false;
+        Node* value=nullptr;std::vector<Param> args;
+    };
+    struct DeclType {
+        std::string name,parent,nativeName,nativeBase,nativeKey;bool iface=false;
+        std::vector<std::string> nativeInterfaces;
+        std::unordered_map<std::string,DeclMember> fields;
+        std::vector<Param> args;std::vector<std::string> types;
+    };
+    std::unordered_map<std::string,DeclType> scriptTypes_;
+    std::unordered_set<std::string> declaredTypeNames_;
+    std::unordered_set<std::string> nativeAdapters_;
+    std::unordered_map<std::string,std::string> nativeNames_;
+    DeclType knownType(std::string name,bool iface,int line) {
+        auto alias=nativeNames_.find(name);if(alias!=nativeNames_.end())name=alias->second;
+        auto t=scriptTypes_.find(name);
+        if(t==scriptTypes_.end() && name.find('.')!=std::string::npos) {auto c=scriptTypes_.find(name.substr(name.find_last_of('.')+1));if(c!=scriptTypes_.end()&&c->second.nativeName==name)t=c;}
+        if(t==scriptTypes_.end() || t->second.iface!=iface)err("Expected previously declared script "+std::string(iface?"interface: ":"class: ")+name,line);
+        return t->second;
+    }
+    std::string normalizeType(std::string type) {
+        for(auto& alias:nativeNames_) {size_t at=0;while((at=type.find(alias.first,at))!=std::string::npos){type.replace(at,alias.first.size(),alias.second);at+=alias.second.size();}}
+        for(auto& entry:scriptTypes_)if(!entry.second.nativeName.empty()) {
+            auto& full=entry.second.nativeName;auto& name=entry.second.name;
+            size_t at=0;while((at=type.find(full,at))!=std::string::npos){type.replace(at,full.size(),name);at+=name.size();}
+        }
+        return type;
+    }
+    bool sameType(const std::string& a,const std::string& b) {return a.empty()||b.empty()||normalizeType(a)==normalizeType(b);}
+    bool compatibleMember(const DeclMember& a,const DeclMember& b) {
+        if(a.stat || a.method!=b.method || !sameType(a.type,b.type))return false;
+        if(a.method) {
+            if(a.args.size()!=b.args.size())return false;
+            for(size_t i=0;i<a.args.size();i++)if(!sameType(a.args[i].type,b.args[i].type) || ((b.args[i].opt||b.args[i].def)&&!a.args[i].opt&&!a.args[i].def))return false;
+        } else {
+            std::string rg=b.get.empty()?"default":b.get,rs=b.set.empty()?"default":b.set;
+            std::string ag=a.get.empty()?"default":a.get,as=a.set.empty()?"default":a.set;
+            if((rg=="default"||rg=="get")&&ag!="default"&&ag!="get")return false;
+            if((rs=="default"||rs=="set")&&as!="default"&&as!="set")return false;
+        }
+        return true;
+    }
+    int memberFlags(const DeclMember& m) {return (m.stat?1:0)|(m.get=="null"?2:0)|(m.set=="null"?4:0);}
+    Node* callNode(Node* fn,const std::vector<Node*>& args,int line) {Node* n=mk(N::Call,line);n->a=fn;n->list=args;return n;}
+    Node* returnNode(Node* value,int line) {Node* n=mk(N::Return,line);n->a=value;return n;}
+    Node* functionNode(const std::vector<Param>& args,Node* body,int line) {Node* n=mk(N::Func,line);n->params=args;n->a=body;return n;}
+    Param parameter(const std::string& name) {Param p;p.name=name;return p;}
+    int superCalls(Node* n) {
+        if(!n)return 0;
+        int count=(n->k==N::Call && n->a && n->a->k==N::Ident && n->a->s=="super")?1:0;
+        count+=superCalls(n->a)+superCalls(n->b)+superCalls(n->c);
+        for(auto* x:n->list)count+=superCalls(x);
+        for(auto& c:n->cases){for(auto* x:c.values)count+=superCalls(x);count+=superCalls(c.guard)+superCalls(c.body);}
+        for(auto& c:n->catches)count+=superCalls(c.body);
+        return count;
+    }
+    Node* idNode(const std::string& s, int line) { Node* n = mk(N::Ident,line); n->s=s; return n; }
+    Node* fieldNode(Node* a, const std::string& s, int line) { Node* n=mk(N::Field,line); n->a=a; n->s=s; return n; }
+    Node* assignNode(Node* a, Node* b, int line) { Node* n=mk(N::Assign,line); n->s="="; n->a=a; n->b=b; return n; }
+    Node* stringNode(const std::string& s,int line) { Node* n=mk(N::Str,line); n->s=s; return n; }
+    Node* objectNode(const std::vector<std::string>& names,const std::vector<Node*>& values,int line) {
+        Node* n=mk(N::Object,line); n->names=names; n->list=values; return n;
+    }
+    void collectPatternBindings(Node* n,std::unordered_set<std::string>& scope,bool nested=false) {
+        if(n->k==N::Call)for(Node* a:n->list)collectPatternBindings(a,scope,true);
+        if(nested && n->k==N::Ident && n->s!="_" && n->s!="null" && n->s!="true" && n->s!="false")scope.insert(n->s);
+    }
+    Node* staticReceiver(const std::string& cls,const std::string& owner,int line) {
+        Node* receiver=idNode("__ss_class_scope",line);
+        for(std::string name=cls;name!=owner;name=scriptTypes_.at(name).parent)
+            receiver=fieldNode(receiver,"__ss_parent",line);
+        return receiver;
+    }
+    std::string memberName(const DeclMember& property,int flags,bool ctorWrite,
+                           const std::string& method,bool writing,bool updating) {
+        const auto& name=property.name;
+        bool inAccessor=(property.get=="get" && method=="get_"+name) || (property.set=="set" && method=="set_"+name);
+        if(inAccessor && !property.fin)return "__ss_raw_"+name;
+        bool rawRead=(flags&2)!=0 || inAccessor;
+        bool rawWrite=(flags&4)!=0 || (property.fin && !property.stat && ctorWrite);
+        if(updating) {
+            if(rawRead && rawWrite)return "__ss_raw_"+name;
+            if(rawRead)return "__ss_read_"+name;
+            if(rawWrite)return "__ss_write_"+name;
+            return name;
+        }
+        return (writing?rawWrite:rawRead)?"__ss_raw_"+name:name;
+    }
+    Node* memberRefs(Node* n,const std::unordered_map<std::string,int>& members,
+                     std::unordered_set<std::string> locals,const std::string& cls,
+                     const std::string& method="", bool writing=false, bool updating=false) {
+        if (!n) return n;
+        if(n->k==N::Ident) {
+            if(n->s=="this") {
+                auto m=scriptTypes_.at(cls).fields.find(method);
+                if(m!=scriptTypes_.at(cls).fields.end()&&m->second.stat)err("this is not available in a static member",n->line);
+                return idNode("__ss_self",n->line);
+            }
+            if(n->s=="super")err("super is only valid as a constructor or inherited method call",n->line);
+            auto it=members.find(n->s);
+            if(it!=members.end() && !locals.count(n->s)) {
+                auto& fields=scriptTypes_.at(cls).fields;
+                auto& property=fields.at(n->s);
+                bool isStatic=(it->second&1)!=0;
+                if(!isStatic && fields.at(method).stat)err("Instance member '"+n->s+"' is not available in a static member",n->line);
+                Node* receiver=isStatic?staticReceiver(cls,property.owner,n->line):idNode("__ss_self",n->line);
+                bool ctorWrite=property.owner==cls && locals.count("__ss_ctor_write")!=0;
+                return fieldNode(receiver,memberName(property,it->second,ctorWrite,method,writing,updating),n->line);
+            }
+            return n;
+        }
+        if(n->k==N::Call && n->a && n->a->k==N::Ident && n->a->s=="super") {
+            if(scriptTypes_.at(cls).parent.empty()||method!="new")err("super(...) requires a derived constructor",n->line);
+            n->a=fieldNode(idNode("__ss_super",n->line),"__ss_ctor",n->line);
+            for(auto& a:n->list)a=memberRefs(a,members,locals,cls,method);return n;
+        }
+        if(n->k==N::Field && n->a && n->a->k==N::Ident && n->a->s=="super") {
+            auto& type=scriptTypes_.at(cls);
+            auto context=type.fields.find(method);if(context!=type.fields.end()&&context->second.stat)err("super is not available in a static member",n->line);
+            if(type.parent.empty())err("Invalid super member: "+n->s,n->line);
+            auto& base=scriptTypes_.at(type.parent);auto m=base.fields.find(n->s);
+            if(m==base.fields.end()||m->second.stat||(writing&&m->second.method))err("Invalid super member: "+n->s,n->line);
+            n->a=idNode("__ss_super",n->line);return n;
+        }
+        if(n->k==N::Field && n->a && n->a->k==N::Ident && n->a->s=="this") {
+            auto& type=scriptTypes_.at(cls);auto context=type.fields.find(method);
+            if(context!=type.fields.end()&&context->second.stat)err("this is not available in a static member",n->line);
+            auto it=members.find(n->s);
+            if(it!=members.end()) {
+                if(it->second&1)err("Static member '"+n->s+"' requires a class receiver",n->line);
+                auto& property=type.fields.at(n->s);
+                bool ctorWrite=property.owner==cls && locals.count("__ss_ctor_write")!=0;
+                n->s=memberName(property,it->second,ctorWrite,method,writing,updating);
+            }
+            n->a=idNode("__ss_self",n->line);return n;
+        }
+        if(n->k==N::Assign || (n->k==N::Unop && (n->s=="++" || n->s=="--")) || (n->k==N::Coalesce && n->flag)) {
+            n->a=memberRefs(n->a,members,locals,cls,method,true,n->k!=N::Assign || n->s!="=");
+            n->b=memberRefs(n->b,members,locals,cls,method);return n;
+        }
+        if(n->k==N::Switch) {
+            n->a=memberRefs(n->a,members,locals,cls,method);
+            n->b=memberRefs(n->b,members,locals,cls,method);
+            for(auto& c:n->cases) {
+                auto scope=locals;for(Node* v:c.values)collectPatternBindings(v,scope);
+                c.guard=memberRefs(c.guard,members,scope,cls,method);
+                c.body=memberRefs(c.body,members,scope,cls,method);
+            }
+            return n;
+        }
+        if(n->k==N::Block) {
+            for(auto& e:n->list) {
+                if(e->k==N::Var) { e->a=memberRefs(e->a,members,locals,cls,method); locals.insert(e->s); }
+                else if(e->k==N::Vars) {for(auto* v:e->list){v->a=memberRefs(v->a,members,locals,cls,method);locals.insert(v->s);}}
+                else { if(e->k==N::Func && !e->s.empty()) locals.insert(e->s); e=memberRefs(e,members,locals,cls,method); }
+            }
+            return n;
+        }
+        if(n->k==N::Func) {
+            bool isConstructor=locals.erase("__ss_ctor_root")!=0;
+            locals.erase("__ss_ctor_write");
+            for(auto& p:n->params) { p.def=memberRefs(p.def,members,locals,cls,method); locals.insert(p.name); }
+            if(isConstructor)locals.insert("__ss_ctor_write");
+        }
+        if(n->k==N::For) { n->a=memberRefs(n->a,members,locals,cls,method); locals.insert(n->s); if(!n->s2.empty()) locals.insert(n->s2); n->b=memberRefs(n->b,members,locals,cls,method); return n; }
+        n->a=memberRefs(n->a,members,locals,cls,method);
+        n->b=memberRefs(n->b,members,locals,cls,method);
+        n->c=memberRefs(n->c,members,locals,cls,method);
+        for(auto& e:n->list) e=memberRefs(e,members,locals,cls,method);
+        for(auto& c:n->cases) { for(auto& v:c.values) v=memberRefs(v,members,locals,cls,method); c.guard=memberRefs(c.guard,members,locals,cls,method); c.body=memberRefs(c.body,members,locals,cls,method); }
+        for(auto& c:n->catches) { auto scope=locals; scope.insert(c.var); c.body=memberRefs(c.body,members,scope,cls,method); }
+        return n;
+    }
+
+    Node* defaultFieldValue(const std::string& type,int line) {
+        if(type=="Int" || type=="Float")return mk(type=="Int"?N::Int:N::Float,line);
+        return idNode(type=="Bool"?"false":"null",line);
+    }
+
+    Node* parseDeclaration(bool isEnum,int line,bool isInterface=false,bool isNative=false,bool isShared=false) {
+        std::string cls=ident(),parent,nativeName;std::vector<std::string> interfaces,nativeParents;
+        if(isNative) {expect(T_LP,"'('");if(peek().k!=T_STR)unexpected();nativeName=next().s;while(peek().k==T_COMMA){next();if(peek().k!=T_STR)unexpected();nativeParents.push_back(next().s);}expect(T_RP,"')'");}
+        if(!declaredTypeNames_.insert(cls).second)err("Duplicate type: "+cls,line);
+        while(isId("extends")||isId("implements")) {
+            bool extend=next().s=="extends";
+            if(isEnum || (isInterface && !extend))err("Invalid type relationship",line);
+            if(extend && !isInterface) {
+                if(!parent.empty())err("A class can extend only one class",line);
+                parent=ident();while(peek().k==T_DOT){next();parent+="."+ident();}
+            } else {
+                do {interfaces.push_back(ident());while(peek().k==T_DOT){next();interfaces.back()+="."+ident();}if(peek().k!=T_COMMA)break;next();}while(true);
+            }
+        }
+        expect(T_LB,"'{'");
+        Node* result=mk(N::Var,line);result->s=cls;
+        if(isEnum) {
+            std::vector<std::string> names; std::vector<Node*> values;
+            int index=0;
+            while(peek().k!=T_RB) {
+                std::string name=ident();
+                if(std::find(names.begin(),names.end(),name)!=names.end() || name.compare(0,5,"__ss_")==0)err("Invalid or duplicate enum constructor: "+name,line);
+                Node* f=mk(N::Func,line); bool callable=false;
+                if(peek().k==T_LP) {next();parseParams(f);callable=true;}
+                expect(T_SEMI,"';'");
+                Node* params=mk(N::Array,line);
+                for(auto& p:f->params) params->list.push_back(idNode(p.name,line));
+                Node* idx=mk(N::Int,line);idx->iv=index++;
+                Node* val=objectNode({"__ss_enum","tag","index","params"},{stringNode(cls,line),stringNode(name,line),idx,params},line);
+                if(callable) {Node* ret=mk(N::Return,line);ret->a=val;f->a=ret;val=f;}
+                names.push_back(name);values.push_back(val);
+            }
+            next();result->s2="__ss_enum";names.push_back("__ss_name");values.push_back(stringNode(cls,line));result->a=isShared?callNode(fieldNode(idNode("__ssShared",line),"type",line),{stringNode(cls,line)},line):objectNode(names,values,line);return result;
+        }
+
+        result->s2="__ss_type";
+        DeclType base,info;info.name=cls;info.parent=parent;info.iface=isInterface;info.types.push_back(cls);info.nativeName=nativeName;
+        if(isNative){if(isInterface){info.nativeInterfaces=nativeParents;info.nativeInterfaces.push_back(nativeName);}else info.nativeBase=nativeName;}
+        if(!parent.empty()) {
+            base=knownType(parent,false,line);parent=base.name;info.parent=parent;info.nativeBase=base.nativeBase;info.nativeInterfaces=base.nativeInterfaces;info.fields=base.fields;info.fields.erase("new");
+            for(auto& t:base.types)info.types.push_back(t);
+        }
+        for(auto& name:interfaces) {
+            DeclType iface=knownType(name,true,line);name=iface.name;
+            for(auto& t:iface.nativeInterfaces)if(std::find(info.nativeInterfaces.begin(),info.nativeInterfaces.end(),t)==info.nativeInterfaces.end())info.nativeInterfaces.push_back(t);
+            for(auto& t:iface.types)if(std::find(info.types.begin(),info.types.end(),t)==info.types.end())info.types.push_back(t);
+            if(isInterface)for(auto& entry:iface.fields) {
+                auto prev=info.fields.find(entry.first);
+                if(prev!=info.fields.end()&&(!compatibleMember(prev->second,entry.second)||!compatibleMember(entry.second,prev->second)))err("Conflicting interface member: "+entry.first,line);
+                info.fields[entry.first]=entry.second;
+            }
+        }
+        std::vector<DeclMember> own;std::unordered_set<std::string> seen;
+        while(peek().k!=T_RB) {
+            if(peek().k==T_SEMI){next();continue;}
+            DeclMember m;m.owner=cls;
+            while(isId("public")||isId("private")||isId("static")||isId("inline")||isId("override")||isId("sealed")) {
+                std::string mod=next().s;if(mod=="static")m.stat=true;if(mod=="override")m.over=true;if(mod=="sealed")m.fin=true;
+            }
+            std::string word=ident();m.name=ident();m.method=word=="function";m.fin=m.fin||word=="final";
+            if(isInterface&&(m.stat||m.over||m.fin||m.name=="new"))err("Invalid interface member: "+m.name,line);
+            if(m.method) {
+                m.value=mk(N::Func,line);expect(T_LP,"'('");parseParams(m.value);m.args=m.value->params;
+                if(peek().k==T_COLON){next();m.type=signatureType();m.value->s2=m.type;}
+                if(isInterface||isNative)expect(T_SEMI,"';'");else m.value->a=parseExpr();
+            } else if(word=="var"||word=="final") {
+                if(peek().k==T_LP){next();m.get=ident();expect(T_COMMA,"','");m.set=ident();expect(T_RP,"')'");}
+                else if(m.fin){m.get="default";m.set="never";}
+                if(!m.get.empty()&&((m.get!="default"&&m.get!="get"&&m.get!="null"&&m.get!="never")||(m.set!="default"&&m.set!="set"&&m.set!="null"&&m.set!="never")))err("Unsupported property accessor",line);
+                if(m.fin && m.set!="never")err("Final property requires a never setter: "+m.name,line);
+                if(peek().k==T_COLON){next();m.type=signatureType();}
+                if(isOp("=")){next();if(isInterface)err("Interface fields cannot have initializers",line);m.value=parseExpr();}
+                expect(T_SEMI,"';'");
+            } else err("Expected class or interface member",line);
+            if(m.name.compare(0,5,"__ss_")==0 || !seen.insert(m.name).second)err("Invalid or duplicate member: "+m.name,line);
+            if(m.name=="new"&&(m.stat||!m.method))err("Invalid constructor",line);
+            auto inherited=info.fields.find(m.name);
+            if(m.over && (inherited==info.fields.end()||!inherited->second.method||!m.method||m.stat||inherited->second.stat))err("Nothing to override: "+m.name,line);
+            if(inherited!=info.fields.end()) {
+                auto& prev=inherited->second;
+                auto declaring=scriptTypes_.find(prev.owner);
+                if(!m.method&&declaring!=scriptTypes_.end()&&!declaring->second.nativeName.empty())err("Cannot redeclare native field: "+m.name,line);
+                if(m.stat!=prev.stat || m.method!=prev.method)err("Incompatible inherited member: "+m.name,line);
+                if(m.method&&(prev.fin||!compatibleMember(m,prev)||!compatibleMember(prev,m)))err("Incompatible override: "+m.name,line);
+                if(!m.method&&(prev.fin||!sameType(m.type,prev.type)||(!m.stat&&!compatibleMember(m,prev))))err("Incompatible inherited field: "+m.name,line);
+            }
+            own.push_back(m);info.fields[m.name]=m;
+        }
+        next();
+        if(isNative) {
+            auto c=info.fields.find("new");if(c!=info.fields.end())info.args=c->second.args;
+            scriptTypes_[cls]=info;
+            result->a=callNode(fieldNode(idNode("__ssNative",line),"type",line),{stringNode(nativeName,line)},line);return result;
+        }
+        if(isInterface) {
+            scriptTypes_[cls]=info;
+            result->a=isShared?callNode(fieldNode(idNode("__ssShared",line),"type",line),{stringNode(cls,line)},line):objectNode({"__ss_name","__ss_interface"},{stringNode(cls,line),idNode("true",line)},line);return result;
+        }
+        for(auto& entry:info.fields) {
+            auto& f=entry.second;std::vector<std::string> accessors;
+            if(f.get=="get")accessors.push_back("get_"+f.name);if(f.set=="set")accessors.push_back("set_"+f.name);
+            for(auto& a:accessors) {
+                auto m=info.fields.find(a);
+                if(m==info.fields.end()||!m->second.method||m->second.stat!=f.stat)err("Missing accessor: "+a,line);
+                size_t arity=a.compare(0,4,"get_")==0?0:1;
+                if(m->second.args.size()!=arity)err("Invalid accessor arity: "+a+" (expected "+std::to_string(arity)+")",line);
+            }
+        }
+        for(auto& name:interfaces)for(auto& required:knownType(name,true,line).fields) {
+            auto actual=info.fields.find(required.first);
+            if(actual==info.fields.end()||!compatibleMember(actual->second,required.second))err("Class "+cls+" does not implement "+name+"."+required.first,line);
+        }
+        Node* ctor=nullptr;auto ci=info.fields.find("new");if(ci!=info.fields.end())ctor=ci->second.value;
+        info.args=ctor?ctor->params:base.args;
+        if(ctor&&!parent.empty()) {
+            int count=superCalls(ctor);
+            if(count==0) {
+                for(auto& a:base.args)if(!a.opt&&!a.def)err("Constructor must call super(...) in "+cls,line);
+                Node* block=mk(N::Block,line);block->list={callNode(idNode("super",line),{},line),ctor->a};ctor->a=block;
+            }else {
+                if(count>1)err("Constructor can call super(...) only once",line);
+                Node* first=ctor->a;
+                if(first->k==N::Block)first=first->list.empty()?nullptr:first->list[0];
+                if(!first || first->k!=N::Call || first->a->k!=N::Ident || first->a->s!="super")err("super(...) must be the first constructor statement",line);
+            }
+        }
+        if(!info.nativeBase.empty()||!info.nativeInterfaces.empty()) {
+            std::sort(info.nativeInterfaces.begin(),info.nativeInterfaces.end());info.nativeKey=info.nativeBase+"|";
+            for(size_t i=0;i<info.nativeInterfaces.size();i++){if(i)info.nativeKey+=",";info.nativeKey+=info.nativeInterfaces[i];}
+            if(!nativeAdapters_.count(info.nativeKey)&&!nativeAdapters_.count("*"))err("Register this native adapter at application build time: "+info.nativeKey,line);
+        }
+        scriptTypes_[cls]=info;
+        if(isShared){result->a=callNode(fieldNode(idNode("__ssShared",line),"type",line),{stringNode(cls,line)},line);return result;}
+        std::unordered_map<std::string,int> members;for(auto& entry:info.fields)members[entry.first]=memberFlags(entry.second);
+        Node* setup=mk(N::Block,line),*build=mk(N::Block,line);
+        for(auto& m:own)if(m.method&&m.name!="new")
+            (m.stat?setup:build)->list.push_back(assignNode(fieldNode(idNode(m.stat?cls:"__ss_self",line),m.name,line),memberRefs(m.value,members,{},cls,m.name),line));
+        std::vector<std::string> propNames[2];std::vector<Node*> propValues[2];
+        for(auto& entry:info.fields) {
+            auto& m=entry.second;
+            if(!m.get.empty()&&(!m.stat||m.owner==cls)) {
+                propNames[m.stat].push_back(m.name);
+                propValues[m.stat].push_back(objectNode({"get","set"},{stringNode(m.get,line),stringNode(m.set,line)},line));
+            }
+        }
+        build->list.push_back(assignNode(fieldNode(idNode("__ss_self",line),"__ss_access",line),objectNode(propNames[0],propValues[0],line),line));
+        setup->list.push_back(assignNode(fieldNode(idNode(cls,line),"__ss_access",line),objectNode(propNames[1],propValues[1],line),line));
+        for(auto& m:own)if(!m.method&&!m.stat)
+            build->list.push_back(assignNode(fieldNode(idNode("__ss_self",line),"__ss_raw_"+m.name,line),defaultFieldValue(m.type,line),line));
+        for(auto& m:own)if(!m.method&&!m.stat&&m.value)
+            build->list.push_back(assignNode(fieldNode(idNode("__ss_self",line),"__ss_raw_"+m.name,line),memberRefs(m.value,members,{},cls,m.name),line));
+        Node* constructor=ctor?memberRefs(ctor,members,{"__ss_ctor_root"},cls,"new"):!parent.empty()?fieldNode(idNode("__ss_super",line),"__ss_ctor",line):functionNode({},mk(N::Block,line),line);
+        std::vector<std::string> superNames;std::vector<Node*> superValues;
+        for(auto& entry:info.fields)if(!entry.second.method&&!entry.second.stat) {
+            auto& f=entry.second;superNames.push_back(entry.first);
+            superValues.push_back(objectNode({"get","set"},{stringNode(f.get.empty()?"default":f.get,line),stringNode(f.set.empty()?"default":f.set,line)},line));
+        }
+        std::vector<std::string> methodNames={"__ss_ctor","__ss_receiver","__ss_superfields"};
+        std::vector<Node*> methodValues={constructor,idNode("__ss_self",line),objectNode(superNames,superValues,line)};
+        for(auto& entry:info.fields)if(entry.second.method&&!entry.second.stat&&entry.first!="new") {
+            methodNames.push_back(entry.first);methodValues.push_back(fieldNode(idNode("__ss_self",line),entry.first,line));
+        }
+        build->list.push_back(returnNode(objectNode(methodNames,methodValues,line),line));
+        Node* baseBuild=parent.empty()?idNode("null",line):callNode(fieldNode(idNode(parent,line),"__ss_build",line),{idNode("__ss_self",line)},line);
+        Node* builder=functionNode({parameter("__ss_self")},returnNode(callNode(functionNode({parameter("__ss_super")},build,line),{baseBuild},line),line),line);
+        setup->list.push_back(assignNode(fieldNode(idNode(cls,line),"__ss_build",line),builder,line));
+        Node* createBody=mk(N::Block,line);
+        createBody->list.push_back(assignNode(fieldNode(idNode("__ss_self",line),"__ss_access",line),objectNode({}, {},line),line));
+        if(!info.nativeKey.empty())createBody->list.push_back(assignNode(fieldNode(idNode("__ss_self",line),"__ss_binding",line),callNode(fieldNode(idNode("__ssNative",line),"prepare",line),{idNode("__ss_self",line),stringNode(info.nativeKey,line)},line),line));
+        Node* prepared=mk(N::Var,line);prepared->s="__ss_prepared";prepared->a=callNode(fieldNode(idNode("__ss_class_scope",line),"__ss_build",line),{idNode("__ss_self",line)},line);createBody->list.push_back(prepared);
+        if(!info.nativeKey.empty()&&info.nativeBase.empty())createBody->list.push_back(callNode(fieldNode(idNode("__ssNative",line),"construct",line),{fieldNode(idNode("__ss_self",line),"__ss_binding",line)},line));
+        std::vector<Node*> args;for(auto& p:info.args)args.push_back(idNode(p.name,line));
+        createBody->list.push_back(callNode(fieldNode(idNode("__ss_prepared",line),"__ss_ctor",line),args,line));createBody->list.push_back(returnNode(info.nativeKey.empty()?idNode("__ss_self",line):callNode(fieldNode(idNode("__ssNative",line),"finish",line),{idNode("__ss_self",line)},line),line));
+        if(!info.nativeKey.empty()) {
+            Node* guarded=mk(N::Block,line);guarded->list.assign(createBody->list.begin()+2,createBody->list.end());createBody->list.resize(2);
+            Node* cleanup=mk(N::Block,line);cleanup->list.push_back(callNode(fieldNode(idNode("__ssNative",line),"cancel",line),{fieldNode(idNode("__ss_self",line),"__ss_binding",line)},line));
+            Node* error=mk(N::Throw,line);error->a=idNode("__ss_nativeError",line);cleanup->list.push_back(error);
+            Node* attempt=mk(N::Try,line);attempt->a=guarded;CatchC caught;caught.var="__ss_nativeError";caught.body=cleanup;attempt->catches.push_back(caught);createBody->list.push_back(attempt);
+        }
+        Node* types=mk(N::Array,line);for(auto& t:info.types)types->list.push_back(stringNode(t,line));
+        Node* self=objectNode({"__ss_class","__ss_types","__ss_nativeKey"},{stringNode(cls,line),types,stringNode(info.nativeKey,line)},line);
+        std::vector<Param> factoryArgs=info.args;for(auto& a:factoryArgs){a.opt=a.opt||a.def;a.def=nullptr;}
+        Node* factory=functionNode(factoryArgs,returnNode(callNode(functionNode({parameter("__ss_self")},createBody,line),{self},line),line),line);
+        setup->list.push_back(assignNode(fieldNode(idNode(cls,line),"__ss_create",line),factory,line));
+        setup->list.push_back(assignNode(fieldNode(idNode(cls,line),"__ss_name",line),stringNode(cls,line),line));
+        if(!parent.empty())setup->list.push_back(assignNode(fieldNode(idNode(cls,line),"__ss_parent",line),idNode(parent,line),line));
+        for(auto& m:own)if(!m.method&&m.stat)
+            setup->list.push_back(assignNode(fieldNode(idNode(cls,line),"__ss_raw_"+m.name,line),defaultFieldValue(m.type,line),line));
+        for(auto& m:own)if(!m.method&&m.stat&&m.value)
+            setup->list.push_back(assignNode(fieldNode(idNode(cls,line),"__ss_raw_"+m.name,line),memberRefs(m.value,members,{},cls,m.name),line));
+        setup->list.push_back(returnNode(idNode(cls,line),line));
+        Node* bindClass=callNode(functionNode({parameter(cls)},setup,line),{idNode("__ss_class_scope",line)},line);
+        result->a=callNode(functionNode({parameter("__ss_class_scope")},returnNode(bindClass,line),line),{objectNode({}, {},line)},line);return result;
+    }
     Node* parseFunction(int line) {
         Node* f = mk(N::Func, line);
         if (peek().k == T_ID) f->s = next().s;
         expect(T_LP, "'('");
         parseParams(f);
-        if (peek().k == T_COLON) { next(); skipType(); }
+        if (peek().k == T_COLON) { next(); f->s2=signatureType(); }
         f->a = parseExpr();
         return f;
     }
@@ -1088,6 +1479,11 @@ private:
         if (w == "break") { next(); return mk(N::Break, line); }
         if (w == "continue") { next(); return mk(N::Continue, line); }
         if (w == "throw") { next(); Node* n = mk(N::Throw, line); n->a = parseExpr(); return n; }
+        if(w=="nativeadapter") {next();expect(T_LP,"'('");if(peek().k!=T_STR)unexpected();nativeAdapters_.insert(next().s);expect(T_RP,"')'");return mk(N::Nop,line);}
+        if(w=="nativealias") {next();expect(T_LP,"'('");if(peek().k!=T_STR)unexpected();std::string source=next().s;expect(T_COMMA,"','");if(peek().k!=T_STR)unexpected();nativeNames_[source]=next().s;expect(T_RP,"')'");return mk(N::Nop,line);}
+        if(w=="nativeclass"||w=="nativeinterface"){next();return parseDeclaration(false,line,w=="nativeinterface",true);}
+        if(w=="sharedclass"||w=="sharedenum"||w=="sharedinterface"){next();return parseDeclaration(w=="sharedenum",line,w=="sharedinterface",false,true);}
+        if (w == "class" || w == "enum" || w == "interface") { next(); return parseDeclaration(w == "enum", line, w == "interface"); }
         if (w == "new") {
             next();
             Node* n = mk(N::New, line);
@@ -1156,7 +1552,7 @@ private:
 }  // namespace
 
 void parseProgram(const std::string& src, const std::string& origin, Ast& ast, int startLine) {
-    Lexer lx(src, origin, startLine);
+    Lexer lx(src, origin, src.compare(0,26,"/*sscript-native-prelude*/")==0?0:startLine);
     Parser ps(lx.run(), ast, origin);
     ast.root = ps.parseProgramNode();
 }

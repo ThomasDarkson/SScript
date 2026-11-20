@@ -1,3 +1,18 @@
+# 25.0.0
+## Additions
+- Added script classes with constructors, inheritance, interfaces, and properties
+    - (**C++ ONLY**) Script classes can extend compiled Haxe classes and implement native Haxe interfaces
+- Added script enums with pattern matching
+- Added `onError` callbacks for script errors
+
+## Additions (SSVM) (**C++ ONLY++**)
+- Added support for regex
+- Added support for dotted new expressions and wildcard imports
+- Added support for enum pattern matching in `switch`
+
+## Fixes
+- Fixed a backward compatibility issue
+
 # 24.0.0
 ## Additions
 - (**C++ ONLY**) Added SSVM, a bytecode virtual machine written in C++, which runs scripts instead of the interpreter whenever possible

@@ -5,10 +5,8 @@ import haxe.macro.Context;
 import haxe.macro.Expr;
 #end
 
-class SSVMBuild
-{
-	public static macro function build():Array<Field>
-	{
+class SSVMBuild {
+	public static macro function build():Array<Field> {
 		#if macro
 		var fields = Context.getBuildFields();
 		if (!Context.defined("cpp"))
@@ -32,9 +30,12 @@ class SSVMBuild
 <set name="SSVM_DIR" value="$dir"/>
 <files id="haxe">
 	<compilerflag value="-I$dir/include"/>
+	<depend name="$dir/include/ssvm.hpp"/>
 </files>
 <files id="ssvm">
 	<compilerflag value="-I$dir/include"/>
+	<depend name="$dir/include/ssvm.hpp"/>
+	<depend name="$dir/src/internal.hpp"/>
 	<compilerflag value="-std=c++11" if="gcc"/>
 	<file name="$dir/src/parser.cpp"/>
 	<file name="$dir/src/compiler.cpp"/>

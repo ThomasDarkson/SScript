@@ -1,0 +1,3 @@
+-D scriptable
+--macro hscript.native.NativeWarning.greet()
+--macro hscript.native.NativeRuntimeBuild.init()

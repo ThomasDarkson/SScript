@@ -150,6 +150,10 @@ int ssvm_compile(ssvm_vm* v, const char* source, const char* origin) {
 const char* ssvm_program_unsupported(ssvm_vm* v, int id) { Program* p = prog(v, id); return keep(v, p ? p->unsupported : std::string("no such program")); }
 int ssvm_program_need_count(ssvm_vm* v, int id) { Program* p = prog(v, id); return p ? (int)p->needs.size() : 0; }
 const char* ssvm_program_need(ssvm_vm* v, int id, int i) { Program* p = prog(v, id); return keep(v, p ? p->needs[(size_t)i] : std::string()); }
+int ssvm_program_need_deferred(ssvm_vm* v, int id, int i) {
+    Program* p = prog(v, id);
+    return p && i >= 0 && (size_t)i < p->needs.size() && !p->eagerNeeds.count(p->needs[(size_t)i]) ? 1 : 0;
+}
 int ssvm_program_declared_count(ssvm_vm* v, int id) { Program* p = prog(v, id); return p ? (int)p->declared.size() : 0; }
 const char* ssvm_program_declared(ssvm_vm* v, int id, int i) { Program* p = prog(v, id); return keep(v, p ? p->declared[(size_t)i] : std::string()); }
 int ssvm_program_import_count(ssvm_vm* v, int id) { Program* p = prog(v, id); return p ? (int)p->imports.size() : 0; }
@@ -291,6 +295,27 @@ int ssvm_ref_array_get(ssvm_vm* v, int ref, int i) {
     Value x = refVal(v, ref);
     if (x.t != Type::Obj || x.o->kind != K::Array || i < 0 || (size_t)i >= ((ArrObj*)x.o)->v.size()) return I_(v).newRef(Value());
     return I_(v).newRef(((ArrObj*)x.o)->v[(size_t)i]);
+}
+int ssvm_ref_object_get(ssvm_vm* v,int ref,const char* name,int raw) {
+    try {
+        VM::Impl& I=I_(v);Value x=refVal(v,ref);
+        if(raw && x.t==Type::Obj && x.o->kind==K::Object)return I.newRef(I.objGet((ObjObj*)x.o,I.intern(name)));
+        std::string key=name;
+        NativeObj* getter=I.newNative("native object read",[x,key](VM& vm,Value*,int){return vm.getField(x,key);});
+        Value out;
+        if(I.guardedCall(Value::Object(getter),nullptr,0,out))return I.newRef(out);
+        v->error=I.errMsg;return -1;
+    }catch(const std::exception& e){v->error=e.what();return -1;}
+}
+int ssvm_ref_object_set(ssvm_vm* v,int ref,const char* name,int value,int raw) {
+    try {
+        VM::Impl& I=I_(v);Value x=refVal(v,ref),val=refVal(v,value);
+        if(raw && x.t==Type::Obj && x.o->kind==K::Object){I.objSet((ObjObj*)x.o,I.intern(name),val);I.freeRef(value);return 0;}
+        std::string key=name;
+        NativeObj* setter=I.newNative("native object write",[x,val,key](VM& vm,Value*,int){vm.setField(x,key,val);return Value();});
+        Value out;bool ok=I.guardedCall(Value::Object(setter),nullptr,0,out);I.freeRef(value);
+        if(ok)return 0;v->error=I.errMsg;return -1;
+    }catch(const std::exception& e){I_(v).freeRef(value);v->error=e.what();return -1;}
 }
 int ssvm_ref_object_len(ssvm_vm* v, int ref) {
     Value x = refVal(v, ref);

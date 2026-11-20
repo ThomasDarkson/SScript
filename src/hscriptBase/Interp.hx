@@ -42,6 +42,7 @@ private enum SScriptNull {
 }
 
 class Interp {
+    public var nativeLifetime:Int=0;
 	static final defaultVariables:Array<String> = ["null", "true", "false", "trace", "Bool", "Int", "Float", "String", "Dynamic", "Array"];
 	public var variables : Map<String,Dynamic>;
 	public var finalVariables : Map<String,Dynamic>;
@@ -138,7 +139,8 @@ class Interp {
 		variables = new Map();
 		finalVariables = new Map();
 
-		finalVariables.set("null",null);
+		finalVariables.set("__ssNative",new hscript.native.NativeTypes.NativeAPI(function(){return locals==null?-1:nativeLifetime;},function(){return !sandboxed;},function(){return script;}));
+        finalVariables.set("null",null);
 		finalVariables.set("true",true);
 		finalVariables.set("false",false);
 		finalVariables.set("trace",Reflect.makeVarArgs(function(el) {
@@ -181,8 +183,8 @@ class Interp {
 		binops.set("<<",function(e1,e2) return FastBinop.shl(me.expr(e1), me.expr(e2)));
 		binops.set(">>",function(e1,e2) return FastBinop.shr(me.expr(e1), me.expr(e2)));
 		binops.set(">>>",function(e1,e2) return FastBinop.ushr(me.expr(e1), me.expr(e2)));
-		binops.set("==",function(e1,e2) return me.expr(e1) == me.expr(e2));
-		binops.set("!=",function(e1,e2) return me.expr(e1) != me.expr(e2));
+		binops.set("==",function(e1,e2) return hscript.native.NativeTypes.unwrap(me.expr(e1)) == hscript.native.NativeTypes.unwrap(me.expr(e2)));
+		binops.set("!=",function(e1,e2) return hscript.native.NativeTypes.unwrap(me.expr(e1)) != hscript.native.NativeTypes.unwrap(me.expr(e2)));
 		binops.set(">=",function(e1,e2) return me.expr(e1) >= me.expr(e2));
 		binops.set("<=",function(e1,e2) return me.expr(e1) <= me.expr(e2));
 		binops.set(">",function(e1,e2) return me.expr(e1) > me.expr(e2));
@@ -231,7 +233,10 @@ class Interp {
 			case _:
 		}
 
-		return Std.isOfType(expr1, expr2);
+        if(Std.isOfType(expr2,hscript.native.NativeDescriptor))return Std.isOfType(hscript.native.NativeTypes.unwrap(expr1),(cast expr2:hscript.native.NativeDescriptor).nativeType);
+        var scriptType = hscript.native.NativeTypes.scriptName(expr2);
+        if(scriptType != null) return scriptTypeMatches(expr1,scriptType);
+        return Std.isOfType(hscript.native.NativeTypes.unwrap(expr1), expr2);
 	}
 
 	function coalesce(e1,e2) : Dynamic
@@ -242,12 +247,17 @@ class Interp {
 		return e1 == null ? e2:e1;
 	}
 
-	function coalesce2(e1,e2) : Dynamic{
-		var me = this;
-		var expr1=e1;
-		var expr2=e2;
-		var e1=me.expr(e1);
-		return if(e1==null) assign(expr1,expr2) else e1;
+	function coalesce2(e1:Expr,e2:Expr) : Dynamic {
+		switch(Tools.expr(e1)) {
+		case EField(receiver,name,fields):
+			var resolved = improvedField && fields != null && fields.length > 1 ? findField(fields,"op") : null;
+			var object = resolved != null ? resolved : expr(receiver);
+			var current = get(object,name);
+			return current == null ? set(object,name,expr(e2)) : current;
+		default:
+			var current = expr(e1);
+			return current == null ? assign(e1,e2) : current;
+		}
 	}
 
 	function setVar( name : String, v : Dynamic ) {
@@ -575,19 +585,19 @@ class Interp {
 			var field = Reflect.getProperty(specialObject.obj,id);
 			return field;
 		}
-		var v = finalVariables.get(id);
-		if( v == null )
-			v = variables.get(id);
-		if( v==null )
-			error(EUnknownVariable(id));
-		return v;
+        if(finalVariables.exists(id)) return finalVariables.get(id);
+        if(variables.exists(id)) return variables.get(id);
+        return error(EUnknownVariable(id));
 	}
+
+    function scriptTypeMatches(value:Dynamic,name:String):Bool return hscript.native.NativeTypes.scriptMatches(value,name);
 
 	function catchTypeMatches( err : Dynamic, t : Null<CType> ) : Bool {
 		if( t == null )
 			return true;
 
 		var typeName = Tools.ctToType(t);
+        if(scriptTypeMatches(err,typeName)) return true;
 		if( typeName == null || typeName == "Dynamic" )
 			return true;
 
@@ -600,6 +610,8 @@ class Interp {
 			case _:
 				var cl : Dynamic = try resolve(typeName) catch( e : Dynamic ) null;
 				if( cl == null ) cl = Tools.resolve(typeName);
+                if(Std.isOfType(cl,hscript.native.NativeDescriptor))return Std.isOfType(hscript.native.NativeTypes.unwrap(err),(cast cl:hscript.native.NativeDescriptor).nativeType);
+                if(cl!=null && Reflect.isObject(cl) && hscript.native.NativeTypes.scriptName(cl)!=null) return false;
 				if( cl == null )
 					return Tools.getType(err) == typeName;
 				else if( Tools.isEnum(cl) )
@@ -614,6 +626,7 @@ class Interp {
 			return null; 
 
 		var typeName = Tools.ctToType(t);
+        if(scriptTypeMatches(v,typeName)) return v;
 		if( typeName == null || typeName == "Dynamic" )
 			return v;
 
@@ -642,6 +655,8 @@ class Interp {
 			case _:
 				var cl : Dynamic = try resolve(typeName) catch( e : Dynamic ) null;
 				if( cl == null ) cl = Tools.resolve(typeName);
+                if(Std.isOfType(cl,hscript.native.NativeDescriptor))return Std.isOfType(hscript.native.NativeTypes.unwrap(v),(cast cl:hscript.native.NativeDescriptor).nativeType)?hscript.native.NativeTypes.unwrap(v):fail();
+                if(cl!=null && Reflect.isObject(cl) && hscript.native.NativeTypes.scriptName(cl)!=null) return fail();
 				if( cl == null ) return v;
 				else if( Reflect.isEnumValue(v) ) {
 					if( Type.getEnum(v) == cl ) return v;
@@ -658,16 +673,26 @@ class Interp {
 		return switch( Tools.expr(pattern) ) {
 			case EIdent("_"):
 				true;
-			case EIdent(name):
+			case EIdent("true"), EIdent("false"), EIdent("null"):
+                expr(pattern) == val;
+            case EIdent(name):
 				bindings.push({ n : name, v : val });
 				true;
 			case ECall(ce, args):
 				switch( Tools.expr(ce) ) {
 					case EIdent(ctorName), EField(_, ctorName, _):
-						if( !Reflect.isEnumValue(val) || Type.enumConstructor(val) != ctorName )
+						var scriptEnum = val != null && Reflect.isObject(val) && Reflect.hasField(val,"__ss_enum");
+                        var tag = scriptEnum ? Reflect.field(val,"tag") : (Reflect.isEnumValue(val) ? Type.enumConstructor(val) : null);
+                        var ownerType:Dynamic = switch(Tools.expr(ce)) {
+                            case EField(owner,_,_): try expr(owner) catch(_:Dynamic) null;
+                            default:null;
+                        };
+                        var expectedType = scriptEnum && ownerType != null ? Reflect.field(ownerType,"__ss_name") : null;
+                        if( tag != ctorName || (scriptEnum && expectedType != null && Reflect.field(val,"__ss_enum") != expectedType)
+                            || (!scriptEnum && ownerType != null && Type.getEnum(val) != ownerType) )
 							false;
 						else {
-							var params = Type.enumParameters(val);
+							var params:Array<Dynamic> = scriptEnum ? Reflect.field(val,"params") : Type.enumParameters(val);
 							if( params.length != args.length )
 								false;
 							else {
@@ -807,9 +832,9 @@ class Interp {
 							if( c1 == ">".code ) return FastBinop.shr(expr(e1), expr(e2));
 							if( c1 == "=".code ) return expr(e1) >= expr(e2);
 						case "=".code:
-							if( c1 == "=".code ) return expr(e1) == expr(e2);
+							if( c1 == "=".code ) return hscript.native.NativeTypes.unwrap(expr(e1)) == hscript.native.NativeTypes.unwrap(expr(e2));
 						case "!".code:
-							if( c1 == "=".code ) return expr(e1) != expr(e2);
+							if( c1 == "=".code ) return hscript.native.NativeTypes.unwrap(expr(e1)) != hscript.native.NativeTypes.unwrap(expr(e2));
 						case "|".code:
 							if( c1 == "|".code ) return expr(e1) == true || expr(e2) == true;
 						case "&".code:
@@ -909,7 +934,7 @@ class Interp {
 			var en = Type.resolveEnum(pkg);
 			if( c != null )
 			{
-				var fields = Reflect.fields(c);
+				var fields = Type.getClassFields(c);
 				for( field in fields )
 				{
 					var f = Reflect.getProperty(c,field);
@@ -919,7 +944,7 @@ class Interp {
 			}
 			else if( en != null ) 
 			{
-				var f = Reflect.fields(en);
+				var f = Type.getEnumConstructs(en);
 				for( field in f )
 				{
 					var f = Reflect.field(en, field);
@@ -1017,9 +1042,12 @@ class Interp {
 				compiledExprFuncCache.set(name, compileReturn(fexpr));
 			}
 			var f = function(args:Array<Dynamic>) 
-			{			
+			{
+				if(me.locals == null)
+					throw "Script function belongs to a destroyed script";
+                var oldInFunc = inFunc;			
 				var compiledBody = null;
-				if( compiled && depth == 0 ) {
+				if( compiled && name != null && depth == 0 ) {
 					compiledBody = compiledExprFuncCache.get(name);
 				}
 				function error(expr)
@@ -1068,7 +1096,7 @@ class Interp {
 								str += ":" + Tools.ctToType(param.t);
 							error(ECustom(str));
 						}
-						else if( arg == null && param.value != null )
+						else if( (arg == null || arg == Not_NULL) && param.value != null )
 							args[i] = expr(param.value);
 					}
 				}
@@ -1084,27 +1112,18 @@ class Interp {
 				}
 				var r = null;
 				var oldDecl = declared.length;
-				if( inTry )
-					try {
-						r = compiledBody != null ? compiledBody() : me.exprReturn(fexpr);
-					} catch( e : Dynamic ) {
-						me.locals = old;
-						me.localsOuter = oldOuter;
-						me.depth = depth;
-						#if neko
-						neko.Lib.rethrow(e);
-						#else
-						throw e;
-						#end
-					}
-				else{
-					r = compiledBody != null ? compiledBody() : me.exprReturn(fexpr);
-				}
+                try {
+                    r = compiledBody != null ? compiledBody() : me.exprReturn(fexpr);
+                } catch(e:Dynamic) {
+                    restore(oldDecl);
+                    me.locals=old;me.localsOuter=oldOuter;me.depth=depth;inFunc=oldInFunc;
+                    throw e;
+                }
 				restore(oldDecl);
 				me.locals = old;
 				me.localsOuter = oldOuter;
 				me.depth = depth;
-				inFunc = false;
+				inFunc = oldInFunc;
 				if( returnedNothing )
 				{
 					if( strictVar )
@@ -1114,7 +1133,12 @@ class Interp {
 					returnedNothing = true;
 				return r;
 			};
-			var f = Reflect.makeVarArgs(f);
+			var body = f;
+			var errorOwner = me.script;
+			var f = Reflect.makeVarArgs(function(args:Array<Dynamic>):Dynamic {
+				if (errorOwner == null || errorOwner.errorBoundaryDepth > 0) return body(args);
+				return errorOwner.withErrorBoundary(function() return body(args));
+			});
 			if( name != null ) {
 				if( depth == 0 ) {
 					// global function
@@ -1258,7 +1282,7 @@ class Interp {
 					}
 
 					var bindings : Array<{ n : String, v : Dynamic }> = [];
-					var valueMatches = if( isCallPattern && Reflect.isEnumValue(val) )
+					var valueMatches = if( isCallPattern && (Reflect.isEnumValue(val) || (val != null && Reflect.isObject(val) && Reflect.hasField(val,"__ss_enum"))) )
 						matchEnumPattern(v, val, bindings)
 					else
 						expr(v) == val;
@@ -1434,8 +1458,8 @@ class Interp {
 			case "<<": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return FastBinop.shl(c1(), c2());
 			case ">>": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return FastBinop.shr(c1(), c2());
 			case ">>>": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return FastBinop.ushr(c1(), c2());
-			case "==": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return c1() == c2();
-			case "!=": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return c1() != c2();
+			case "==": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return hscript.native.NativeTypes.unwrap(c1()) == hscript.native.NativeTypes.unwrap(c2());
+			case "!=": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return hscript.native.NativeTypes.unwrap(c1()) != hscript.native.NativeTypes.unwrap(c2());
 			case ">=": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return c1() >= c2();
 			case "<=": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return c1() <= c2();
 			case ">": var c1 = compileExpr(e1), c2 = compileExpr(e2); return function() return c1() > c2();
@@ -2079,44 +2103,93 @@ class Interp {
 		cast(map, haxe.Constraints.IMap<Dynamic, Dynamic>).set(key, value);
 	}
 
-	inline function get( o : Dynamic, f : String ) : Dynamic {
+	 function get( o : Dynamic, f : String ) : Dynamic {
 		if( o == null ) error(EInvalidAccess(f));
-		return Reflect.getProperty(o,f);
+        if(StringTools.startsWith(f,"__ss_read_"))f="__ss_raw_"+f.substr(10);
+        else if(StringTools.startsWith(f,"__ss_write_"))f=f.substr(11);
+        if(hscript.native.NativeTypes.special(o))return hscript.native.NativeTypes.read(o,f);
+        var receiver=Reflect.field(o,"__ss_receiver"),superFields=Reflect.field(o,"__ss_superfields");
+        var superProperty=superFields==null?null:Reflect.field(superFields,f);
+        if(receiver!=null && superProperty!=null) {
+            var mode:String=Reflect.field(superProperty,"get");
+            if(mode=="get")return call(receiver,Reflect.field(o,"get_"+f),[]);
+            if(mode=="never")return error(ECustom("Cannot read property '"+f+"'"));
+            var binding:hscript.native.NativeBinding=Reflect.field(receiver,"__ss_binding");
+            if(!Reflect.hasField(receiver,f) && binding!=null && binding.hasField(f))return binding.readBase(f);
+            return Reflect.field(receiver,f);
+        }
+        var parent=Reflect.field(o,"__ss_parent");
+        if(parent!=null && !Reflect.hasField(o,f) && !StringTools.startsWith(f,"__ss_")) return get(parent,f);
+		var access = Reflect.field(o,"__ss_access");
+        if(access != null) {
+            if(StringTools.startsWith(f,"__ss_raw_")) {
+                var name=f.substr(9),binding:hscript.native.NativeBinding=Reflect.field(o,"__ss_binding");
+                if(!Reflect.hasField(o,name) && binding!=null && binding.hasField(name))return binding.readBase(name);
+                return Reflect.field(o,name);
+            }
+            var prop = Reflect.field(access,f);
+            if(prop != null) {
+                var mode:String = Reflect.field(prop,"get");
+                if(mode == "get") return call(o,Reflect.field(o,"get_"+f),[]);
+                if(mode == "null" || mode == "never") error(ECustom("Cannot read property '"+f+"'"));
+            }
+        }
+        var binding:hscript.native.NativeBinding=Reflect.field(o,"__ss_binding");
+        if(!Reflect.hasField(o,f) && binding!=null && binding.hasField(f))return Reflect.getProperty(binding.host,f);
+        return access!=null?Reflect.field(o,f):Reflect.getProperty(o,f);
 	}
 
-	inline function set( o : Dynamic, f : String, v : Dynamic ) : Dynamic {
+	 function set( o : Dynamic, f : String, v : Dynamic ) : Dynamic {
 		if( o == null ) error(EInvalidAccess(f));
-		Reflect.setProperty(o,f,v);
+        if(StringTools.startsWith(f,"__ss_write_"))f="__ss_raw_"+f.substr(11);
+        else if(StringTools.startsWith(f,"__ss_read_"))f=f.substr(10);
+        if(hscript.native.NativeTypes.special(o)){hscript.native.NativeTypes.write(o,f,v);return v;}
+        var receiver=Reflect.field(o,"__ss_receiver"),superFields=Reflect.field(o,"__ss_superfields");
+        var superProperty=superFields==null?null:Reflect.field(superFields,f);
+        if(receiver!=null && superProperty!=null) {
+            var mode:String=Reflect.field(superProperty,"set");
+            if(mode=="set"){call(receiver,Reflect.field(o,"set_"+f),[v]);return v;}
+            if(mode=="never")return error(ECustom("Cannot write property '"+f+"'"));
+            var binding:hscript.native.NativeBinding=Reflect.field(receiver,"__ss_binding");
+            if(!Reflect.hasField(receiver,f) && binding!=null && binding.hasField(f)){binding.writeBase(f,v);return v;}
+            Reflect.setField(receiver,f,v);return v;
+        }
+        var parent=Reflect.field(o,"__ss_parent");
+        if(parent!=null && !Reflect.hasField(o,f) && !StringTools.startsWith(f,"__ss_")) return set(parent,f,v);
+		var access = Reflect.field(o,"__ss_access");
+        if(access != null) {
+            if(StringTools.startsWith(f,"__ss_raw_")) {
+                var name=f.substr(9),binding:hscript.native.NativeBinding=Reflect.field(o,"__ss_binding");
+                if(!Reflect.hasField(o,name) && binding!=null && binding.hasField(name)){binding.writeBase(name,v);return v;}
+                Reflect.setField(o,name,v);return v;
+            }
+            var prop = Reflect.field(access,f);
+            if(prop != null) {
+                var mode:String = Reflect.field(prop,"set");
+                if(mode == "set") {call(o,Reflect.field(o,"set_"+f),[v]);return v;}
+                if(mode == "null" || mode == "never") error(ECustom("Cannot write property '"+f+"'"));
+            }
+        }
+        var binding:hscript.native.NativeBinding=Reflect.field(o,"__ss_binding");
+        if(!Reflect.hasField(o,f) && binding!=null && binding.hasField(f)){Reflect.setProperty(binding.host,f,v);return v;}
+        if(access!=null)Reflect.setField(o,f,v);else Reflect.setProperty(o,f,v);
 		return v;
 	}
 
-	function fcall( o : Dynamic, f : String, args : Array<Dynamic>) : Dynamic {
-		var exception = null;
-		try {
-			return call(o, get(o, f), args);
-		}
-		catch( e )
-			exception = e;
-
-		if( f != null ) {
-			var methods = usingMethods.get(f);
-			for( i in methods ) {
-				try {
-					var args = args.copy();
-					args.unshift(o);
-					return call(o, i, args);
-				}
-				catch( e ) {
-					exception = e;
-					continue;
-				}
-			}
-		}
-		return throw exception;
-	}
+	function fcall(o:Dynamic, f:String, args:Array<Dynamic>):Dynamic {
+        var method = get(o,f);
+        if(method != null) return call(o,method,args);
+        var lastError:Dynamic=null;
+        for(extension in usingMethods.get(f)) {
+            var extended=args.copy();extended.unshift(o);
+            try {return call(null,extension,extended);} catch(e:Dynamic) {lastError=e;}
+        }
+        if(lastError!=null) throw lastError;
+        return error(EInvalidAccess(f));
+    }
 
 	function call( o : Dynamic, f : Dynamic, args : Array<Dynamic>) : Dynamic {
-		return Reflect.callMethod(o,f,args);
+		return Reflect.callMethod(o,f,[for(a in args)hscript.native.NativeTypes.unwrap(a)]);
 	}
 
 	function cnew( cl : String, args : Array<Dynamic> ) : Dynamic {
@@ -2130,7 +2203,15 @@ class Interp {
 		}
 		if( c == null ) error(EInvalidAccess(cl));
 
-		return Type.createInstance(c,args);
+		if(hscript.native.NativeTypes.read(c,"__ss_interface")==true) return error(ECustom("Cannot instantiate interface: "+cl));
+        if(Std.isOfType(c,hscript.native.NativeDescriptor)) {
+            var descriptor:hscript.native.NativeDescriptor=cast c;
+            if(descriptor.isInterface)return error(ECustom("Cannot instantiate interface: "+cl));
+            return Reflect.callMethod(null,descriptor.read("__ss_create"),args);
+        }
+        var factory = hscript.native.NativeTypes.read(c,"__ss_create");
+        if(factory != null) return call(c,factory,args);
+        return Type.createInstance(c,[for(a in args)hscript.native.NativeTypes.unwrap(a)]);
 	}
 
 	function generateSpecialObjectFields() {

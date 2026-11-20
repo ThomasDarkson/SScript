@@ -53,6 +53,11 @@ enum Token {
 @:access(hscriptBase.Tools)
 @:access(hscript.SScript)
 class Parser {
+    var scriptTypes:Map<String,hscriptBase.Declarations.ScriptTypeInfo>=[];
+    var declaredTypeNames:Map<String,Bool>=[];
+    public var typeSources:Array<{name:String,source:String}>=[];
+    var nativeAdapters:Map<String,Bool>=[];
+    var nativeNames:Map<String,String>=[];
 
 	// config / variables
 	public var line : Int = 0;
@@ -132,6 +137,7 @@ class Parser {
 
 	function initParser( origin , ?startingLine : Int ) {
 		this.origin = origin;
+        scriptTypes=[];declaredTypeNames=[];nativeAdapters=[];nativeNames=[];typeSources=[];
 		readPos = 0;
 		line = startingLine != null ? startingLine : 1;
 		tokenMin = oldTokenMin = 0;
@@ -148,7 +154,8 @@ class Parser {
 	}
 
 	public function parseString( s : String, ?origin : String = "SScript" , ?startingLine : Int ) {
-		initParser(origin, startingLine);
+		var nativePrelude=StringTools.startsWith(s,"/*sscript-native-prelude*/");
+        initParser(origin, nativePrelude?0:startingLine);
 		input = s;
 		readPos = 0;
 		var a = new Array();
@@ -158,7 +165,14 @@ class Parser {
 			push(tk);
 			parseFullExpr(a);
 		}
-		return if( a.length == 1 ) a[0] else mk(EBlock(a),0);
+		if(nativePrelude) {
+            var prelude:Array<Expr>=[],body:Array<Expr>=[];
+            for(e in a)if(e.line==0)prelude.push(e);else body.push(e);
+            var leading:Array<Expr>=[];
+            while(body.length>0 && switch(body[0].e){case EImport(_,_,_,_),EImportStar(_),EUsing(_),EPackage(_):true;default:false;})leading.push(body.shift());
+            a=leading.concat(prelude).concat(body);
+        }
+        return if( a.length == 1 ) a[0] else mk(EBlock(a),0);
 	}
 
 	function unexpected( tk ) : Dynamic {
@@ -582,6 +596,14 @@ class Parser {
 		structures.push(id);
 		var p1 = tokenMin;
 		return switch( id ) {
+		case "nativeadapter": new Declarations(this).parseAdapter();
+        case "nativealias": new Declarations(this).parseNativeAlias();
+        case "nativeclass" | "nativeinterface": new Declarations(this).parse(false,id=="nativeinterface",true);
+        case "sharedclass" | "sharedenum" | "sharedinterface": new Declarations(this).parse(id == "sharedenum",id == "sharedinterface",false,true);
+        case "class" | "enum" | "interface":
+            var result=new Declarations(this).parse(id == "enum", id == "interface");
+            switch(result.e){case EVar(name,_,_,_):typeSources.push({name:name,source:input.substring(p1,tokenMax+1)});default:}
+            result;
 		case "if":
 			ensure(TPOpen);
 			var cond = parseExpr();
@@ -989,6 +1011,9 @@ class Parser {
 
 	function parseExprNext( e1 : Expr ) {
 		var tk = token();
+		// `is` is an operator only after a left-hand expression. Keep it an
+		// identifier elsewhere (notably native Std.is declarations and .is).
+		if( Type.enumEq(tk,TId("is")) ) tk = TOp("is");
 		switch( tk ) {
 		case TOp(op):
 			if( op == "->" ) {
@@ -1075,7 +1100,7 @@ class Parser {
 		}
 	}
 
-	function parseFunctionArgs() {
+	function parseFunctionArgs():Array<Argument> {
 		var args = new Array();
 		var tk = token();
 		if( tk != TPClose ) {
@@ -1105,7 +1130,12 @@ class Parser {
 						arg.value = parseExpr();
 						switch arg.value.e {
 							case EConst(_):
-							case EIdent("null"):
+							case EIdent("null" | "true" | "false"):
+							case EUnop("-",false,value):
+								switch value.e {
+									case EConst(CInt(_) | CFloat(_)):
+									case _: error(ECustom('Default argument value should be constant'));
+								}
 							case _: error(ECustom('Default argument value should be constant'));
 						}
 						//arg.opt = true;
@@ -1369,11 +1399,6 @@ class Parser {
 		oldTokenMax = tokenMax;
 		tokenMin = (this.char < 0) ? readPos : readPos - 1;
 		var t = _token();
-		switch t {
-			case TId("is"):
-				t = TOp("is");
-			case _:
-		}
 		tokenMax = (this.char < 0) ? readPos - 1 : readPos - 2;
 		return t;
 	}
